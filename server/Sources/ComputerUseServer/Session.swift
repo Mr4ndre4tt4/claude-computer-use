@@ -132,8 +132,49 @@ final class Session {
               let items = try? FileManager.default.contentsOfDirectory(atPath: frameworks.path) else { return false }
         return items.contains { $0.hasPrefix("Electron Framework") || $0.contains("Chromium Embedded") || $0.contains("Chrome Framework") }
     }()
-    /// Asks the window server, not the app, so it answers instantly even while the app is busy.
-    var isFrontmost: Bool { NSWorkspace.shared.frontmostApplication?.processIdentifier == pid }
+    var isExcel: Bool { app.bundleIdentifier == "com.microsoft.Excel" }
+    /// Office takes Cmd/Ctrl shortcuts posted to its pid while in the background (verified in
+    /// Excel), so it never needs the focus borrow that other apps need for menu shortcuts.
+    var shortcutsWorkInBackground: Bool { (app.bundleIdentifier ?? "").hasPrefix("com.microsoft.") }
+
+    /// The window that owns keyboard focus (walking up from a focused sheet or panel). App-modal
+    /// alerts are often missing from AXWindows; they are returned as they are.
+    var keyWindow: AXUIElement? {
+        let all = windows
+        guard let focused = appElement.element("AXFocusedWindow") else { return nil }
+        var current: AXUIElement? = focused
+        for _ in 0..<4 {
+            guard let el = current else { break }
+            if all.contains(where: { CFEqual($0, el) }) { return el }
+            current = el.element("AXParent")
+        }
+        return focused
+    }
+
+    /// A focused alert or dialog that blocks input to the app's other windows.
+    var modalAlert: AXUIElement? {
+        guard let focused = appElement.element("AXFocusedWindow") else { return nil }
+        let subrole = focused.str("AXSubrole") ?? ""
+        let isModal = subrole == "AXDialog" || subrole == "AXSystemDialog" || focused.str("AXDescription") == "alert"
+            || focused.str("AXRole") == "AXSheet" || (focused.bool("AXModal") ?? false)
+        return isModal ? focused : nil
+    }
+
+    /// The visible text of a small window (alert message), for warnings.
+    static func texts(in el: AXUIElement, depth: Int = 0) -> [String] {
+        guard depth < 4 else { return [] }
+        var out: [String] = []
+        if el.str("AXRole") == "AXStaticText", let v = el.str("AXValue") ?? el.str("AXTitle"), !v.isEmpty { out.append(v) }
+        for child in el.elements("AXChildren") { out += texts(in: child, depth: depth + 1) }
+        return out
+    }
+    /// Apps whose focused fields claim a settable AXSelectedText that never really lands.
+    var fakesTextInsertion: Bool { needsFocusForKeys || (app.bundleIdentifier ?? "").hasPrefix("com.microsoft.") }
+    /// Asks the window server (not NSWorkspace, which can be stale off the run loop).
+    var isFrontmost: Bool {
+        if let front = Safety.frontPid() { return front == pid }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+    }
 
     // MARK: Windows
 
@@ -146,8 +187,24 @@ final class Session {
                 if let el = elements[index], all.contains(where: { CFEqual($0, el) }) { return el }
                 if all.indices.contains(index) { return all[index] }
             }
+            // Exact title first, then prefix, then substring: "Book1" must not pick "Microsoft Visual Basic - Book1".
             let q = selector.lowercased()
-            if let match = all.first(where: { ($0.str("AXTitle") ?? "").lowercased().contains(q) }) { return match }
+            let titled = all.map { ($0, ($0.str("AXTitle") ?? "").lowercased()) }
+            if let match = titled.first(where: { $0.1 == q }) ?? titled.first(where: { $0.1.hasPrefix(q) })
+                ?? titled.first(where: { $0.1.contains(q) }) {
+                return match.0
+            }
+        }
+        // A focused alert/dialog blocks everything else, so it wins even when not in AXWindows.
+        if selector == nil || selector?.isEmpty == true, let modal = modalAlert {
+            // A sheet lives inside its document window: pick that window so the sheet is shown in it.
+            var current: AXUIElement? = modal
+            for _ in 0..<4 {
+                guard let el = current else { break }
+                if all.contains(where: { CFEqual($0, el) }) { return el }
+                current = el.element("AXParent")
+            }
+            return modal
         }
         // A shared window wins by default.
         if let shared = Sharing.shared.sharedFrame(for: pid),
@@ -225,7 +282,8 @@ final class Session {
         let walker = Walker(
             maxNodes: maxNodes, maxVisit: maxVisit, expandAll: expandAll, pruneOffscreen: pruneOffscreen,
             focused: appElement.element("AXFocusedUIElement").map(ElementKey.init),
-            chosen: window.map(ElementKey.init), windowFrame: windowFrame
+            chosen: window.map(ElementKey.init), windowFrame: windowFrame,
+            focusedWindow: appElement.element("AXFocusedWindow").map(ElementKey.init)
         )
         var roots = appElement.elements("AXChildren")
         if roots.isEmpty {
@@ -374,8 +432,10 @@ final class Walker {
     let focused: ElementKey?
     let chosen: ElementKey?
     let windowFrame: CGRect?
+    let focusedWindow: ElementKey?
 
-    init(maxNodes: Int, maxVisit: Int, expandAll: Bool, pruneOffscreen: Bool, focused: ElementKey?, chosen: ElementKey?, windowFrame: CGRect?) {
+    init(maxNodes: Int, maxVisit: Int, expandAll: Bool, pruneOffscreen: Bool, focused: ElementKey?, chosen: ElementKey?, windowFrame: CGRect?, focusedWindow: ElementKey? = nil) {
+        self.focusedWindow = focusedWindow
         self.maxNodes = maxNodes
         self.maxVisit = maxVisit
         self.expandAll = expandAll
@@ -384,6 +444,8 @@ final class Walker {
         self.chosen = chosen
         self.windowFrame = windowFrame
     }
+
+    static func nonEmptyTitle(_ s: String?) -> String? { nonEmpty(s) }
 
     private static func nonEmpty(_ s: String?) -> String? {
         guard let s else { return nil }
@@ -431,8 +493,10 @@ final class Walker {
         if role == "AXImage", label == nil, meaningfulActions.isEmpty { printable = false }
 
         let isWindowLike = role == "AXWindow"
-        let collapsed = isWindowLike && !expandAll && chosen != nil && key != chosen
-            && (subrole ?? "AXStandardWindow") == "AXStandardWindow"
+        // Only floating panels (inspectors, palettes) stay expanded next to the chosen window; some
+        // apps (iWork) report document windows as AXDialog, so don't rely on AXStandardWindow.
+        let collapsed = isWindowLike && !expandAll && chosen != nil && key != chosen && key != focusedWindow
+            && !["AXFloatingWindow", "AXSystemFloatingWindow", "AXDialog", "AXSystemDialog"].contains(subrole ?? "")
 
         // Visibility is judged against the element's own window (not just the captured one) and
         // any scroll area around it, so floating panels and scrolled-away content are handled right.

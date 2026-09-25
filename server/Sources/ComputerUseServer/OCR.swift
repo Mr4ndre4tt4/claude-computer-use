@@ -13,11 +13,13 @@ enum OCR {
         let confidence: Float
     }
 
-    /// The first recognition after boot loads the model (can take ~30 s); later ones take ~0.1–0.2 s.
-    /// Warming up in the background at launch hides that from the first real request.
+    /// The first recognition in a process loads the model (30–80 s on a busy Mac); later ones take
+    /// ~0.1 s. Loading starts at launch and the first real request waits for it instead of
+    /// starting a second, competing load.
+    private static var warmUpTask: Task<Void, Never>?
+
     static func warmUp() {
-        Task.detached(priority: .utility) {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+        warmUpTask = Task.detached(priority: .utility) {
             let image = NSImage(size: NSSize(width: 160, height: 40))
             image.lockFocus()
             NSColor.white.setFill()
@@ -25,12 +27,13 @@ enum OCR {
             ("warm up" as NSString).draw(at: NSPoint(x: 8, y: 8), withAttributes: [.font: NSFont.systemFont(ofSize: 20)])
             image.unlockFocus()
             if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                _ = try? await recognizeRaw(cg, languages: ["en-US"])
+                _ = try? await recognizeRaw(cg, languages: ["pt-BR", "en-US"])
             }
         }
     }
 
-    static func recognize(_ image: CGImage, languages: [String] = ["pt-BR", "en-US"], timeout: Double = 60) async throws -> [Line] {
+    static func recognize(_ image: CGImage, languages: [String] = ["pt-BR", "en-US"], timeout: Double = 120) async throws -> [Line] {
+        if let warmUpTask { await warmUpTask.value }
         let lines = try await withThrowingTaskGroup(of: [Line]?.self) { group in
             group.addTask { try await recognizeRaw(image, languages: languages) }
             group.addTask {

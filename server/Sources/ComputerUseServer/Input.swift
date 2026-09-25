@@ -45,7 +45,11 @@ struct KeyStroke {
 }
 
 enum Input {
+    /// Pointer events share the system state (they move the real cursor when used at all).
     static var source: CGEventSource? { CGEventSource(stateID: .hidSystemState) }
+    /// The plugin's own virtual keyboard: a private state, so the user's held modifiers never leak
+    /// into our keys and ours never into theirs. Keys from it are only ever posted to a pid.
+    static let keyboard = CGEventSource(stateID: .privateState)
 
     static func pause(_ seconds: Double) { usleep(useconds_t(seconds * 1_000_000)) }
 
@@ -338,13 +342,14 @@ enum Input {
         return stroke
     }
 
-    /// Posts to `pid` when given (background, no focus change), otherwise to the HID stream.
-    private static func post(_ event: CGEvent, to pid: pid_t?) {
-        if let pid { event.postToPid(pid) } else { event.post(tap: .cghidEventTap) }
+    /// Keys go straight to the target process, never into the shared HID stream, so they can't
+    /// land in another app (or mix with what the user is typing) whatever window is in front.
+    private static func post(_ event: CGEvent, to pid: pid_t) {
+        event.postToPid(pid)
     }
 
-    static func press(_ stroke: KeyStroke, to pid: pid_t? = nil) {
-        let src = source
+    static func press(_ stroke: KeyStroke, to pid: pid_t) {
+        let src = keyboard
         var flags: CGEventFlags = []
         for modifier in stroke.modifiers {
             flags.insert(modifier.flag)
@@ -374,25 +379,58 @@ enum Input {
 
     /// Types arbitrary Unicode (accents, emoji) independent of keyboard layout.
     /// Newlines press Return and tabs press Tab, exactly like a human typing.
-    static func typeText(_ text: String, to pid: pid_t? = nil) {
-        let src = source
+    static func typeText(_ text: String, to pid: pid_t) {
+        let src = keyboard
+        // Apps like spreadsheets switch modes on Tab/Return and on the first key of an entry
+        // (cell → editor); keys arriving during that switch are dropped, so pace those moments.
+        var startOfEntry = true
+        let map = layoutMap()
         for char in text {
-            if char == "\n" || char == "\r\n" || char == "\r" {
-                press(KeyStroke(code: 36), to: pid)
-                continue
-            }
-            if char == "\t" {
-                press(KeyStroke(code: 48), to: pid)
+            if char == "\n" || char == "\r\n" || char == "\r" || char == "\t" {
+                press(KeyStroke(code: char == "\t" ? 48 : 36), to: pid)
+                pause(0.08)
+                startOfEntry = true
                 continue
             }
             let units = Array(String(char).utf16)
+            // Real key code when the layout has the character: apps that start an editor on the
+            // first key (Excel cells) read the key code and drop a bare Unicode event on key 0.
+            let (code, shifted) = map[char] ?? (0, false)
             for down in [true, false] {
-                guard let event = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: down) else { continue }
-                event.flags = []
+                guard let event = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down) else { continue }
+                event.flags = shifted ? .maskShift : []
                 event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
                 post(event, to: pid)
             }
-            pause(0.006)
+            pause(startOfEntry ? 0.05 : 0.006)
+            startOfEntry = false
         }
+    }
+
+    /// Excel grid entry. With background keys Excel drops the first key of an entry (it is spent
+    /// opening the cell editor), so each entry opens the editor explicitly: F2, then Cmd+A so the
+    /// text replaces the active cell's content like normal typing (without clearing a selected range).
+    static func typeCells(_ text: String, to pid: pid_t) {
+        let selectAll = KeyStroke(modifiers: [(55, .maskCommand)], code: 0)
+        var entry = ""
+        func flush() {
+            guard !entry.isEmpty else { return }
+            press(KeyStroke(code: 120), to: pid)
+            pause(0.12)
+            press(selectAll, to: pid)
+            pause(0.05)
+            typeText(entry, to: pid)
+            entry = ""
+        }
+        for char in text {
+            if char == "\t" || char == "\n" || char == "\r\n" || char == "\r" {
+                flush()
+                press(KeyStroke(code: char == "\t" ? 48 : 36), to: pid)
+                pause(0.1)
+            } else {
+                entry.append(char)
+            }
+        }
+        flush()
     }
 }

@@ -21,7 +21,7 @@ final class Engine {
             throw ToolError("\(running.localizedName ?? app) is outside the shared windows. \(Sharing.shared.describe())\nAsk the user to share it (share_window) or clear the share.")
         }
         if let existing = sessions[running.processIdentifier] {
-            guard existing.isResponsive else { throw notResponding(existing) }
+            guard await waitUntilResponsive(existing) else { throw notResponding(existing) }
             return existing
         }
         let session = Session(app: running)
@@ -31,6 +31,19 @@ final class Engine {
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
         return session
+    }
+
+    /// Apps are often briefly busy right after an action (creating a document, opening a panel);
+    /// keep probing for a while before calling them hung, longer when we just acted on them.
+    private func waitUntilResponsive(_ session: Session) async -> Bool {
+        if session.isResponsive { return true }
+        let patience: Double = Date().timeIntervalSince(lastAction) < 15 ? 10 : 4
+        let deadline = Date().addingTimeInterval(patience)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if session.isResponsive { return true }
+        }
+        return false
     }
 
     private func notResponding(_ session: Session) -> ToolError {
@@ -65,7 +78,8 @@ final class Engine {
 
     /// Brings the app (and the window we last looked at) to the front before synthetic input.
     private func activate(_ session: Session) async {
-        if !session.isFrontmost {
+        let wasFrontmost = session.isFrontmost
+        if !wasFrontmost {
             session.appElement.set("AXFrontmost", kCFBooleanTrue)
             if !session.isFrontmost { session.app.activate() }
             let deadline = Date().addingTimeInterval(1.5)
@@ -75,7 +89,8 @@ final class Engine {
             window.perform("AXRaise")
             window.set("AXMain", kCFBooleanTrue)
         }
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        // Freshly activated apps (Office especially) drop keys until their key window settles.
+        try? await Task.sleep(nanoseconds: wasFrontmost ? 80_000_000 : 250_000_000)
     }
 
     /// Center of an element on screen, scrolling it into view first when needed.
@@ -208,9 +223,13 @@ final class Engine {
         var header: [String] = []
         header.append("App: \(session.name) (\(session.app.bundleIdentifier ?? "?"), pid \(session.pid))\(session.isFrontmost ? " — frontmost" : " — in background")")
         if let win = session.window {
-            let title = win.str("AXTitle") ?? ""
+            let title = Walker.nonEmptyTitle(win.str("AXTitle")) ?? win.str("AXDescription") ?? win.str("AXSubrole") ?? ""
             let count = session.windows.count
             header.append("Window: \(Session.quote(title))\(count > 1 ? " (1 of \(count) windows; pass window=<index or title> to switch)" : "")")
+            if let modal = session.modalAlert, !CFEqual(modal, win) {
+                let message = Session.texts(in: modal).joined(separator: " ").replacingOccurrences(of: "\n", with: " ")
+                header.append("⚠ A modal alert has keyboard focus and blocks input to this window: \(Session.quote(message, max: 200)). Dismiss it first (get_app_state without window= shows it).")
+            }
         }
         var jpegData: Data?
         if let image {
@@ -268,9 +287,16 @@ final class Engine {
     func listApps(runningOnly: Bool, limit: Int) -> [Content] {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
-        let apps = Apps.list(runningOnly: runningOnly)
+        // Build folders and backups leave many copies of one bundle id; list it once (the running
+        // or most recently used copy, thanks to the sort order) and say how many others exist.
+        var apps: [AppInfo] = []
+        var copies: [String: Int] = [:]
+        for app in Apps.list(runningOnly: runningOnly) {
+            if copies[app.id] != nil { copies[app.id]! += 1 } else { copies[app.id] = 0; apps.append(app) }
+        }
         let lines = apps.prefix(limit).map { app -> String in
             var line = "\(app.name) — \(app.id)"
+            if let extra = copies[app.id], extra > 0 { line += " (+\(extra) other cop\(extra == 1 ? "y" : "ies"))" }
             if app.running { line += " [running]" }
             if let date = app.lastUsed { line += " last used \(formatter.string(from: date))" }
             if let count = app.useCount { line += " (\(count) uses)" }
@@ -297,10 +323,22 @@ final class Engine {
     /// change notifications. Apps that ignore background pointer events (Chromium, Electron,
     /// SwiftUI…) get a brief borrow instead: app forward, real pointer, cursor put back, focus
     /// returned to the user's app.
-    private func pointer(_ session: Session, foreground: Bool, restoreCursor: Bool = true,
-                         background: (pid_t) -> Void, real: () -> Void) async -> String {
+    /// A real pointer event lands on whatever window is on top at that point, so refuse unless it
+    /// belongs to the target (another app's window or panel may be covering it).
+    private func checkPointerTarget(_ session: Session, _ point: CGPoint?) throws {
+        guard session.isFrontmost else {
+            throw ToolError("Could not bring \(session.name) to the front; the real pointer event was not sent.")
+        }
+        if let point, let owner = Safety.ownerAt(point), owner.pid != session.pid {
+            throw ToolError("\(owner.name) has a window covering that point, so the click was not sent (it would hit \(owner.name), not \(session.name)). Move or close that window, or use an element_index action.")
+        }
+    }
+
+    private func pointer(_ session: Session, foreground: Bool, restoreCursor: Bool = true, at point: CGPoint?,
+                         background: (pid_t) -> Void, real: () -> Void) async throws -> String {
         if foreground {
             await activate(session)
+            try checkPointerTarget(session, point)
             real()
             return " (foreground)"
         }
@@ -308,10 +346,17 @@ final class Engine {
             let start = Date()
             background(session.pid)
             if await changed(session, since: start) != false { return " (background)" }
+            // Don't escalate on our own: a real click activates the app and moves the user's
+            // pointer. Often nothing changed simply because the target is inert (a label).
+            return " (background; no UI change was detected. If the click should have done something, retry with foreground: true, which briefly takes the pointer and focus)"
         }
         let previous = userFrontmost(excluding: session)
         let cursor = CGEvent(source: nil)?.location
         await activate(session)
+        do { try checkPointerTarget(session, point) } catch {
+            await giveFocusBack(to: previous, from: session)
+            throw error
+        }
         real()
         try? await Task.sleep(nanoseconds: 120_000_000)
         if restoreCursor, let cursor {
@@ -351,12 +396,34 @@ final class Engine {
 
     /// Runs keyboard input. Background by default; apps that ignore background keys get a brief
     /// focus borrow (~0.2 s) and the user's app is re-activated right after.
-    private func withKeyboard(_ session: Session, foreground: Bool, needsKeyWindow: Bool = false, _ body: (pid_t?) -> Void) async -> String {
+    /// Runs keyboard input on the plugin's virtual keyboard: keys are posted to the target process
+    /// only, never into the shared HID stream, so they cannot reach another app or mix with the
+    /// user's typing. Apps that only accept keys while active get a brief focus borrow (~0.2 s).
+    /// Keys go to the app's key window, which is not always the window the agent is working in
+    /// (activating Excel makes the workbook key even while the VBA editor is open, so text meant
+    /// for the editor lands in cells). Move focus to the working window, or refuse.
+    private func ensureKeyWindow(_ session: Session) throws {
+        guard let target = session.window, session.windows.count > 1,
+              let key = session.keyWindow, !CFEqual(key, target) else { return }
+        target.set("AXMain", kCFBooleanTrue)
+        target.set("AXFocused", kCFBooleanTrue)
+        if let now = session.keyWindow, !CFEqual(now, target) {
+            let message = Session.texts(in: now).joined(separator: " ").replacingOccurrences(of: "\n", with: " ")
+            let keyTitle = Walker.nonEmptyTitle(now.str("AXTitle")) ?? (message.isEmpty ? "another window" : "alert: " + String(message.prefix(120)))
+            let targetTitle = target.str("AXTitle") ?? "the working window"
+            throw ToolError("Keys would go to \"\(keyTitle)\", not \"\(targetTitle)\" (the window you are working in), so nothing was sent. Click inside \"\(targetTitle)\" first, or call get_app_state with window=\"\(keyTitle)\" if that is the intended target.")
+        }
+    }
+
+    private func withKeyboard(_ session: Session, foreground: Bool, needsKeyWindow: Bool = false, _ body: (pid_t) -> Void) async throws -> String {
+        let needsKeyWindow = needsKeyWindow && !session.shortcutsWorkInBackground
         let previous = userFrontmost(excluding: session)
+        try ensureKeyWindow(session)
         if foreground {
             await activate(session)
-            body(nil)
-            return " (foreground)"
+            try ensureKeyWindow(session)
+            body(session.pid)
+            return session.isFrontmost ? " (foreground)" : " (could not bring the app forward; sent in background)"
         }
         if (session.needsFocusForKeys || needsKeyWindow) && !session.isFrontmost {
             session.appElement.set("AXFrontmost", kCFBooleanTrue)
@@ -367,10 +434,17 @@ final class Engine {
             if !session.isFrontmost { session.app.activate() }
             let deadline = Date().addingTimeInterval(0.5)
             while !session.isFrontmost && Date() < deadline { try? await Task.sleep(nanoseconds: 15_000_000) }
+            // Frontmost is reported before the key window accepts input; keys sent right away get lost.
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            let front = session.isFrontmost
+            do { try ensureKeyWindow(session) } catch {
+                await giveFocusBack(to: previous, from: session)
+                throw error
+            }
             body(session.pid)
             try? await Task.sleep(nanoseconds: 100_000_000)
             await giveFocusBack(to: previous, from: session)
-            return " (focus borrowed ~0.2s, then returned)"
+            return front ? " (focus borrowed ~0.2s, then returned)" : " (could not take focus; sent in background)"
         }
         body(session.pid)
         await giveFocusBack(to: previous, from: session)
@@ -436,7 +510,7 @@ final class Engine {
         if !foreground, let how = accessibilityClick(session, at: point, button: button, count: count) {
             return "\(label) — \(how)."
         }
-        let how = await pointer(session, foreground: foreground,
+        let how = try await pointer(session, foreground: foreground, at: point,
                                 background: { Input.backgroundClick(pid: $0, at: point, button: button, count: count) },
                                 real: { Input.click(at: point, button: button, count: count) })
         return "\(label) (\(button.rawValue) ×\(count))\(how)."
@@ -495,7 +569,7 @@ final class Engine {
             throw ToolError("Provide element_index, or both x and y.")
         }
         Overlay.shared.report(session, "Hovering", at: point, rect: rect)
-        let how = await pointer(session, foreground: foreground, restoreCursor: false,
+        let how = try await pointer(session, foreground: foreground, restoreCursor: false, at: point,
                                 background: { Input.backgroundHover(pid: $0, at: point) },
                                 real: { Input.move(to: point) })
         return "Hovered at screen point (\(Int(point.x)), \(Int(point.y)))\(how)."
@@ -507,7 +581,7 @@ final class Engine {
         let start = session.toScreen(x: from.0, y: from.1)
         let end = session.toScreen(x: to.0, y: to.1)
         Overlay.shared.report(session, "Dragging", at: end)
-        let how = await pointer(session, foreground: foreground,
+        let how = try await pointer(session, foreground: foreground, at: start,
                                 background: { Input.backgroundDrag(pid: $0, from: start, to: end) },
                                 real: { Input.drag(from: start, to: end) })
         return "Dragged from (\(Int(from.0)), \(Int(from.1))) to (\(Int(to.0)), \(Int(to.1)))\(how)."
@@ -529,7 +603,14 @@ final class Engine {
         let session = try await self.session(app, launch: false)
         defer { markAction() }
         Overlay.shared.report(session, "Typing " + Session.quote(text, max: 40), at: nil)
-        if !foreground, let focused = session.appElement.element("AXFocusedUIElement"),
+        // Excel grid: the first background key of each entry is spent opening the cell editor.
+        if session.isExcel, let focused = session.appElement.element("AXFocusedUIElement"),
+           focused.str("AXRole") == "AXLayoutArea" {
+            return try await typeExcelCells(session, text: text, foreground: foreground)
+        }
+        // Browsers, Electron and Office fake settable text: Excel's formula bar accepts
+        // AXSelectedText but never commits it to the cell.
+        if !foreground, !session.fakesTextInsertion, let focused = session.appElement.element("AXFocusedUIElement"),
            focused.isSettable("AXSelectedText"), !isInWebContent(focused) {
             // Native text views: insert at the caret through accessibility. Newlines/tabs are still keys.
             var segment = ""
@@ -541,7 +622,7 @@ final class Engine {
                 if char == "\n" || char == "\r\n" || char == "\r" || char == "\t" {
                     flush()
                     let key = KeyStroke(code: char == "\t" ? 48 : 36)
-                    _ = await withKeyboard(session, foreground: false) { Input.press(key, to: $0) }
+                    _ = try await withKeyboard(session, foreground: false) { Input.press(key, to: $0) }
                 } else {
                     segment.append(char)
                 }
@@ -549,8 +630,79 @@ final class Engine {
             flush()
             return "Inserted \(text.count) character(s) into the focused field (background)."
         }
-        let how = await withKeyboard(session, foreground: foreground) { Input.typeText(text, to: $0) }
+        let how = try await withKeyboard(session, foreground: foreground) { Input.typeText(text, to: $0) }
         return "Typed \(text.count) character(s)\(how)."
+    }
+
+    /// Excel grid entry, row by row. Excel's own Return after a run of Tabs jumps back to wherever
+    /// it thinks the run began (not reset by Name Box navigation), so each new row is reached
+    /// explicitly through the Name Box: same column as the starting cell, next row.
+    private func typeExcelCells(_ session: Session, text: String, foreground: Bool) async throws -> String {
+        func nameBox() -> AXUIElement? {
+            guard let window = session.window else { return nil }
+            func search(_ el: AXUIElement, _ depth: Int) -> AXUIElement? {
+                guard depth < 4 else { return nil }
+                for child in el.elements("AXChildren") {
+                    if child.str("AXIdentifier") == "NameBox" { return child }
+                    if let found = search(child, depth + 1) { return found }
+                }
+                return nil
+            }
+            return search(window, 0)
+        }
+        // "N2" → ("N", 2); ranges and names ("A1:B3", "Total") can't anchor rows.
+        var anchor: (column: String, row: Int)?
+        if let box = nameBox(), let ref = box.str("AXValue"),
+           let match = ref.range(of: #"^\$?([A-Za-z]{1,3})\$?([0-9]+)$"#, options: .regularExpression), match == ref.startIndex..<ref.endIndex {
+            let letters = ref.filter(\.isLetter)
+            if let row = Int(ref.filter(\.isNumber)) { anchor = (letters.uppercased(), row) }
+        }
+        let rows = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        var how = ""
+        for (i, row) in rows.enumerated() {
+            let isLast = i == rows.count - 1
+            if !row.isEmpty {
+                how = try await withKeyboard(session, foreground: foreground) { Input.typeCells(row, to: $0) }
+            }
+            if isLast { break }
+            if let anchor, let box = nameBox() {
+                // Commit the open entry without moving, then jump to the next row's first cell.
+                if !row.isEmpty {
+                    _ = try await withKeyboard(session, foreground: foreground) { Input.press(KeyStroke(code: 36), to: $0) }
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                box.set("AXFocused", kCFBooleanTrue)
+                box.set("AXValue", "\(anchor.column)\(anchor.row + i + 1)" as CFString)
+                // AXConfirm doesn't navigate; a Return in the focused Name Box does.
+                Input.press(KeyStroke(code: 36), to: session.pid)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if let grid = session.appElement.element("AXFocusedUIElement"), grid.str("AXRole") != "AXLayoutArea",
+                   let layout = session.window?.elements("AXChildren").first(where: { $0.str("AXRole") == "AXLayoutArea" }) {
+                    layout.set("AXFocused", kCFBooleanTrue)
+                }
+            } else {
+                how = try await withKeyboard(session, foreground: foreground) { Input.press(KeyStroke(code: 36), to: $0) }
+                Input.pause(0.1)
+            }
+        }
+        let note = anchor.map { " starting at \($0.column)\($0.row), one row per line" } ?? ""
+        return "Typed \(text.count) character(s) into cells\(note) (F2 + select-all per entry, so each replaces its cell)\(how)."
+    }
+
+    /// Text of the app's current modal alert or sheet, if any (used to spot alerts an action raised).
+    func modalSignature(app: String) async -> String? {
+        guard let session = try? await self.session(app, launch: false) else { return nil }
+        return session.modalAlert.map { Session.texts(in: $0).joined(separator: " ") }
+    }
+
+    /// A note for the tool result when the action just raised an alert (compile errors, circular
+    /// references, "save changes?"): later input would be blocked until it is dismissed.
+    func newAlertNote(app: String, before: String?) async -> String {
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        guard let now = await modalSignature(app: app), now != before else { return "" }
+        let message = now.replacingOccurrences(of: "\n", with: " ")
+        return "\n⚠ An alert is now open and blocks input: \(Session.quote(message, max: 200)). Read it with get_app_state and dismiss it before continuing."
     }
 
     func pressKey(app: String, key: String, foreground: Bool) async throws -> String {
@@ -560,8 +712,23 @@ final class Engine {
         Overlay.shared.report(session, "Pressed \(key)", at: nil)
         // Menu shortcuts (Cmd/Ctrl+…) act on the key window, which only an active app has.
         let isShortcut = stroke.modifiers.contains { $0.flag == .maskCommand || $0.flag == .maskControl }
-        let how = await withKeyboard(session, foreground: foreground, needsKeyWindow: isShortcut) { Input.press(stroke, to: $0) }
+        let how = try await withKeyboard(session, foreground: foreground, needsKeyWindow: isShortcut) { Input.press(stroke, to: $0) }
         return "Pressed \(key)\(how)."
+    }
+
+    /// An enabled plain "Paste" button in the working window's toolbars (not a ribbon menu button).
+    private func pasteButton(_ session: Session) -> AXUIElement? {
+        guard let window = session.window else { return nil }
+        func search(_ el: AXUIElement, _ depth: Int) -> AXUIElement? {
+            guard depth < 4 else { return nil }
+            for child in el.elements("AXChildren") {
+                let role = child.str("AXRole")
+                if role == "AXButton", ["Paste", "Colar"].contains(child.str("AXTitle") ?? ""), child.bool("AXEnabled") != false { return child }
+                if role == "AXToolbar" || role == "AXGroup", let found = search(child, depth + 1) { return found }
+            }
+            return nil
+        }
+        return search(window, 0)
     }
 
     func paste(app: String, text: String, format: String, foreground: Bool) async throws -> String {
@@ -569,7 +736,7 @@ final class Engine {
         defer { markAction() }
         Overlay.shared.report(session, "Pasting \(text.count) characters", at: nil)
         // Plain text into a native field: insert directly, leaving the clipboard alone.
-        if !foreground, format.lowercased() == "text" || format.isEmpty,
+        if !foreground, !session.fakesTextInsertion, format.lowercased() == "text" || format.isEmpty,
            let focused = session.appElement.element("AXFocusedUIElement"),
            focused.isSettable("AXSelectedText"), !isInWebContent(focused),
            focused.set("AXSelectedText", text as CFString) == .success {
@@ -577,8 +744,21 @@ final class Engine {
         }
         let saved = Clipboard.save()
         try Clipboard.put(text, format: format)
+        // Some windows only honor Cmd+V while active (legacy editors such as Excel's VBA editor),
+        // but offer a Paste toolbar button that can be pressed in the background.
+        if !foreground, let button = pasteButton(session), button.perform("AXPress") == .success {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            Clipboard.restore(saved)
+            return "Pasted \(text.count) character(s) as \(format) with the window's Paste button (background); clipboard restored."
+        }
         let stroke = try Input.parse("super+v")
-        let how = await withKeyboard(session, foreground: foreground, needsKeyWindow: true) { Input.press(stroke, to: $0) }
+        let how: String
+        do {
+            how = try await withKeyboard(session, foreground: foreground, needsKeyWindow: true) { Input.press(stroke, to: $0) }
+        } catch {
+            Clipboard.restore(saved)
+            throw error
+        }
         // Give the app time to read the pasteboard before restoring the user's clipboard.
         try? await Task.sleep(nanoseconds: 600_000_000)
         Clipboard.restore(saved)
@@ -625,7 +805,7 @@ final class Engine {
            let done = scrollViaBar(area, direction: direction.lowercased(), pages: pages) {
             return done
         }
-        let how = await pointer(session, foreground: foreground,
+        let how = try await pointer(session, foreground: foreground, at: point,
                                 background: { Input.backgroundScroll(pid: $0, at: point, dx: dx, dy: dy) },
                                 real: { Input.scroll(at: point, dx: dx, dy: dy) })
         return "Scrolled \(direction) \(pages) page(s)\(how)."
@@ -717,10 +897,24 @@ final class Engine {
                 newValue = value as CFString
             }
             if el.set("AXValue", newValue) == .success {
+                // Text views may accept the write and then restore their own content; check a beat later.
+                try? await Task.sleep(nanoseconds: 80_000_000)
                 let readBack = el.str("AXValue")
-                if readBack == nil || readBack == value || Double(readBack ?? "") == Double(value) {
+                if (readBack == nil && !value.isEmpty) || (readBack ?? "") == value || Double(readBack ?? "") == Double(value) {
                     Overlay.shared.report(session, "Set value of [\(index)]", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) }, rect: el.frame)
                     return "Set the value of [\(index)]."
+                }
+            }
+        }
+        // Text fields: select the whole content and replace it through accessibility (no keys at all).
+        if !session.fakesTextInsertion, el.isSettable("AXSelectedTextRange"), el.isSettable("AXSelectedText") {
+            let length = (el.str("AXValue") ?? "").utf16.count
+            var range = CFRange(location: 0, length: length)
+            if let axRange = AXValueCreate(.cfRange, &range), el.set("AXSelectedTextRange", axRange) == .success,
+               el.set("AXSelectedText", value as CFString) == .success {
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                if (el.str("AXValue") ?? "") == value {
+                    return "Set the value of [\(index)] (replaced its text through accessibility)."
                 }
             }
         }
@@ -770,14 +964,36 @@ final class Engine {
 
     /// Finds the on-screen control whose visible text matches: accessibility first (exact label,
     /// then partial, preferring enabled and clickable elements), OCR as the fallback.
+    /// True when `needle` occurs in `haystack` as whole words (bounded by non-alphanumerics).
+    nonisolated static func containsWord(_ haystack: String, _ needle: String) -> Bool {
+        guard !needle.isEmpty else { return false }
+        var searchRange = haystack.startIndex..<haystack.endIndex
+        while let range = haystack.range(of: needle, range: searchRange) {
+            let beforeOK = range.lowerBound == haystack.startIndex
+                || !(haystack[haystack.index(before: range.lowerBound)].isLetter || haystack[haystack.index(before: range.lowerBound)].isNumber)
+            let afterOK = range.upperBound == haystack.endIndex
+                || !(haystack[range.upperBound].isLetter || haystack[range.upperBound].isNumber)
+            if beforeOK && afterOK { return true }
+            searchRange = haystack.index(after: range.lowerBound)..<haystack.endIndex
+        }
+        return false
+    }
+
     private func locate(_ session: Session, text: String) async throws -> (index: Int?, point: CGPoint?, how: String) {
         ensureWindow(session)
         let needle = Engine.fold(text)
         let collected = session.collect(expandAll: false, maxNodes: 4000, maxVisit: 20_000, pruneOffscreen: true)
+        // "OK" must not match "Workbook area": short queries need a whole-word match, and big
+        // containers only count on an exact label.
+        let containers: Set<String> = ["AXLayoutArea", "AXScrollArea", "AXGroup", "AXWindow", "AXSplitGroup", "AXWebArea", "AXTable", "AXOutline", "AXList"]
         func score(_ node: NodeInfo) -> Int? {
             let labels = [node.title, node.desc, node.value, node.placeholder].compactMap { $0 }.map(Engine.fold)
             var points: Int
-            if labels.contains(needle) { points = 100 } else if labels.contains(where: { $0.contains(needle) }) { points = 40 } else { return nil }
+            if labels.contains(needle) { points = 100 }
+            else if containers.contains(node.role) { return nil }
+            else if labels.contains(where: { Engine.containsWord($0, needle) }) { points = 60 }
+            else if needle.count >= 4, labels.contains(where: { $0.contains(needle) }) { points = 30 }
+            else { return nil }
             if Session.obviousPress.contains(node.role) || node.actions.contains("AXPress") { points += 20 }
             if node.enabled == false { points -= 50 }
             if node.role == "AXStaticText" { points -= 5 }
@@ -796,7 +1012,9 @@ final class Engine {
         }
         let lines = try await ocrLines(session)
         let exact = lines.first { Engine.fold($0.text) == needle }
-        guard let hit = exact ?? lines.first(where: { Engine.fold($0.text).contains(needle) }) else {
+        let partial = lines.first(where: { Engine.containsWord(Engine.fold($0.text), needle) })
+            ?? (needle.count >= 4 ? lines.first(where: { Engine.fold($0.text).contains(needle) }) : nil)
+        guard let hit = exact ?? partial else {
             throw ToolError("No visible element or text matching \(Session.quote(text)) in \(session.name). Try get_app_state or read_screen_text.")
         }
         // For a partial OCR hit, aim at the matching words inside the line.

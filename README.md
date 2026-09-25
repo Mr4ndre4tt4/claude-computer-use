@@ -24,21 +24,24 @@ Plugin de [Claude Code](https://claude.com/claude-code) que permite ao Claude op
 | `open` | Abre um arquivo, pasta ou URL em segundo plano, com o app padrão ou com um app escolhido. |
 | `batch` | Várias ações numa única chamada. |
 | `share_window` | Abre o seletor nativo do macOS para **você** escolher a janela que o Claude pode usar (trava de escopo). |
-| `list_apps`, `wait`, `check_permissions` | Utilitários. |
+| `list_apps`, `wait`, `check_permissions` | Utilitários. `list_apps` mostra cada app uma vez, mesmo com várias cópias instaladas. |
 
 ### Diferenciais
 
 - **Não intrusivo.**
+  - **Teclado virtual próprio.** As teclas vão só para o processo do app alvo, a partir de uma fonte de eventos privada. Nunca entram no fluxo do teclado do sistema: não caem no app que estiver na frente e não se misturam com o que você digita nem com os modificadores que você segura.
+  - **Guarda de janela.** Antes de digitar, o plugin confere se a janela que recebe o teclado é a janela em que o Claude está trabalhando. Se for outra janela ou um alerta modal, ele tenta corrigir em segundo plano e, se não conseguir, recusa com um erro claro.
   - Os cliques usam a acessibilidade do app, e cliques por coordenada identificam o elemento naquele ponto e o acionam da mesma forma.
   - A digitação e a colagem de texto simples em campos nativos são inseridas direto, sem usar o clipboard.
-  - Teclas simples vão direto para o processo do app.
-  - Dois casos pegam o foco por cerca de 0,2 s e devolvem na hora: atalhos com Cmd/Ctrl, que agem sobre a janela ativa e por regra do AppKit exigem o app ativo, e o teclado em Chrome, Electron e Firefox.
+  - Alguns casos pegam o foco por cerca de 0,2 s e devolvem na hora: atalhos com Cmd/Ctrl em apps que exigem janela ativa (o Office aceita em segundo plano) e o teclado em Chrome, Electron e Firefox.
   - Se um app roubar o foco sozinho, o plugin devolve o foco para você.
-- **Verifica se a ação funcionou.** Depois de um clique, arrasto ou hover em segundo plano, o plugin confere pelas notificações do app se algo mudou. Se nada mudou (Chromium, Electron e SwiftUI ignoram esse tipo de evento), ele repete sozinho: traz o app à frente, usa o ponteiro real, devolve o cursor para onde estava e devolve o foco para você.
+- **Verifica se a ação funcionou.** Depois de um clique, arrasto ou hover em segundo plano, o plugin confere pelas notificações do app se algo mudou. Se nada mudou, ele avisa e **não** usa o mouse real por conta própria. Ponteiro real só com `foreground: true` ou em Chromium/Electron/Firefox, e é recusado se outra janela cobrir o ponto.
+- **Alertas modais visíveis.** Um alerta ou folha que bloqueia o app aparece no topo do `get_app_state`, com o texto e os botões.
+- **Excel.** A digitação no grid preenche células de verdade (cada entrada abre o editor da célula e substitui o conteúdo), inclusive `Tab`/`Return` entre células e fórmulas. O editor do VBA recebe código por `paste`, pelo botão Paste do próprio editor.
 - **Rolagem exata em segundo plano.** O plugin move a barra de rolagem pela acessibilidade.
 - **Rápido.** Em vez de esperas fixas, o plugin escuta as notificações de mudança de interface do app e lê a tela assim que ela para de mudar.
   - Ler a tela logo depois de uma ação leva cerca de 0,3 s. Um clique leva cerca de 40 ms.
-  - Se o app travar, o erro aparece em cerca de 1 s, sem ficar preso esperando.
+  - Se o app travar, o plugin espera alguns segundos (mais logo depois de uma ação, quando o app costuma estar ocupado) e então avisa com clareza.
 - **Visão ao vivo, no estilo Codex.** Um card flutuante mostra:
   - a miniatura ao vivo da janela controlada, com os apps anteriores empilhados atrás;
   - um cursor fantasma que desliza até o alvo, com o elemento destacado e um pulso no clique;

@@ -81,10 +81,13 @@ final class Tools {
 
         case "click":
             let count = max(1, min(int(a, "click_count") ?? 1, 3))
-            return [.text(try await engine.click(
-                app: try required(a, "app"), index: int(a, "element_index"), x: double(a, "x"), y: double(a, "y"),
+            let appName = try required(a, "app")
+            let before = await engine.modalSignature(app: appName)
+            let result = try await engine.click(
+                app: appName, index: int(a, "element_index"), x: double(a, "x"), y: double(a, "y"),
                 text: string(a, "text"), button: try MouseButtonKind.parse(string(a, "mouse_button")), count: count, foreground: fg(a)
-            ))]
+            )
+            return [.text(result + (await engine.newAlertNote(app: appName, before: before)))]
 
         case "hover":
             return [.text(try await engine.hover(
@@ -100,14 +103,23 @@ final class Tools {
 
         case "type_text":
             guard let text = string(a, "text") else { throw ToolError("Missing required argument 'text'.") }
-            return [.text(try await engine.typeText(app: try required(a, "app"), text: text, foreground: fg(a)))]
+            let appName = try required(a, "app")
+            let before = await engine.modalSignature(app: appName)
+            let result = try await engine.typeText(app: appName, text: text, foreground: fg(a))
+            return [.text(result + (await engine.newAlertNote(app: appName, before: before)))]
 
         case "press_key":
-            return [.text(try await engine.pressKey(app: try required(a, "app"), key: try required(a, "key"), foreground: fg(a)))]
+            let appName = try required(a, "app")
+            let before = await engine.modalSignature(app: appName)
+            let result = try await engine.pressKey(app: appName, key: try required(a, "key"), foreground: fg(a))
+            return [.text(result + (await engine.newAlertNote(app: appName, before: before)))]
 
         case "paste":
             guard let text = string(a, "text") else { throw ToolError("Missing required argument 'text'.") }
-            return [.text(try await engine.paste(app: try required(a, "app"), text: text, format: string(a, "format") ?? "text", foreground: fg(a)))]
+            let appName = try required(a, "app")
+            let before = await engine.modalSignature(app: appName)
+            let result = try await engine.paste(app: appName, text: text, format: string(a, "format") ?? "text", foreground: fg(a))
+            return [.text(result + (await engine.newAlertNote(app: appName, before: before)))]
 
         case "scroll":
             return [.text(try await engine.scroll(
@@ -223,7 +235,7 @@ final class Tools {
     private func tool(_ name: String, _ description: String, _ properties: JSON, _ required: [String], action: Bool = false) -> JSON {
         var props = properties
         if Tools.inputTools.contains(name) {
-            props["foreground"] = prop("boolean", "Default false: input goes to the app in the background (user's cursor and focus untouched). Set true only if a background attempt visibly had no effect; it brings the app forward and uses the real mouse/keyboard.")
+            props["foreground"] = prop("boolean", "Default false: input goes to the app in the background (user's cursor and focus untouched). Set true only if a background attempt visibly had no effect; it brings the app forward (keys still go only to that app through the plugin's own virtual keyboard; clicks use the real pointer and are refused if another window covers the point).")
         }
         if action {
             props["then_get_state"] = prop("boolean", "Return the refreshed app state (diff + screenshot) right after the action, saving a get_app_state round trip.")

@@ -9,6 +9,14 @@ final class KeyParsingTests: XCTestCase {
         XCTAssertTrue(stroke.modifiers.isEmpty)
     }
 
+    func testWholeWordTextMatch() {
+        XCTAssertTrue(Engine.containsWord("ok", "ok"))
+        XCTAssertTrue(Engine.containsWord("click ok to continue", "ok"))
+        XCTAssertTrue(Engine.containsWord("save as…", "save"))
+        XCTAssertFalse(Engine.containsWord("workbook area, sheet1", "ok"))
+        XCTAssertFalse(Engine.containsWord("booking", "ok"))
+    }
+
     func testModifiersAndAliases() throws {
         let stroke = try Input.parse("ctrl+shift+Tab")
         XCTAssertEqual(stroke.code, 48)

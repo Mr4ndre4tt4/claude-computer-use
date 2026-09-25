@@ -62,29 +62,63 @@ More tools:
 
 All input goes to the target app **without moving the user's cursor or bringing the app
 forward**:
+- The keyboard is the plugin's own **virtual keyboard**: keys are posted only to the target
+  app's process, from a private event source. They never enter the shared keyboard stream, so
+  they cannot land in whatever app is in front, and they never mix with the user's own typing or
+  held modifiers.
+- Before sending keys, the plugin checks that the app's key window is the window you are working
+  in. If another window (or a modal alert) has keyboard focus, it tries to move focus in the
+  background and otherwise refuses with an error naming that window. Read the error and fix the
+  situation (dismiss the alert, click inside the right window) instead of retrying blindly.
 - Clicks use accessibility (Press / focus / select). Coordinate clicks hit-test the element under
   the point first. Only if nothing pressable is there are mouse events posted to the app's process.
-  Success is checked through the app's change notifications. If nothing happened (Chromium,
-  Electron and SwiftUI ignore background pointer events), it automatically retries with a brief
-  borrow: app forward, real pointer, cursor put back, focus returned. Hover leaves the pointer in
-  place so menus stay open.
+  If that has no visible effect, the tool says so and does **not** escalate on its own: retry with
+  `foreground: true` only when the click really should have done something. Chromium, Electron
+  and Firefox ignore background pointer events, so for them clicks briefly borrow the pointer and
+  focus. A real pointer event is refused if another app's window covers the point.
 - Scrolling sets the scroll bar through accessibility (exact, fully in the background). It only
   falls back to wheel events where there is no accessible scroll bar.
 - Typing (and plain-text `paste`) into native fields inserts text directly, without touching the
   clipboard. Plain keys (Return, Tab, arrows, letters) are posted to the app's process.
-- Two cases briefly borrow focus (~0.2 s, then hand it back to the user's app): menu shortcuts
-  with Cmd/Ctrl (they act on the key window, which only an active app has), and any keys for
-  Chromium/Electron/Firefox apps. To avoid even that flicker, prefer the accessibility route when
-  there is one: `window(action: "close")` instead of `super+w`, `select_menu` instead of a
-  shortcut (app-wide commands run fully in the background), `set_value` instead of select-all +
-  typing.
+- `paste` presses a window's own **Paste** toolbar button when it has one (legacy editors such as
+  Excel's VBA editor ignore Cmd+V while in the background), then restores the clipboard.
+- Cmd/Ctrl shortcuts briefly borrow focus (~0.2 s, then hand it back) in apps that need an
+  active key window. Microsoft Office apps take them in the background. Keys for
+  Chromium/Electron/Firefox apps borrow focus too. To avoid even that flicker, prefer the
+  accessibility route when there is one: `window(action: "close")` instead of `super+w`,
+  `select_menu` instead of a shortcut, `set_value` instead of select-all + typing.
 - If an app steals focus by itself, focus is handed back.
-- If an app stops responding, tools fail in about a second with a clear message. Wait and retry,
-  and never force-quit the user's apps on your own.
+- If an app stops responding, tools keep probing for a few seconds (longer right after an
+  action) before failing with a clear message. Wait and retry, and never force-quit the user's
+  apps on your own.
+
+### Modal alerts
+
+When an app shows a modal alert or sheet, `get_app_state` picks it automatically and shows it
+first. When you look at another window, the header warns that an alert blocks input. Dismiss
+the alert before anything else. Keys are refused while it has focus.
+
+### Microsoft Excel
+
+- Typing while a worksheet grid has focus writes cells: each entry opens the cell editor (F2),
+  selects its content and replaces it, so `\t` and `\n` move between cells exactly like a person
+  typing. Put numbers in the workbook's locale (`2.5` on an en-US Excel).
+- Excel's formula bar claims to accept direct text insertion but never commits it. Type into
+  the grid instead.
+- VBA editor: Cmd shortcuts, Home/End and Shift-selection don't work there in the background.
+  Insert modules with its toolbar ("Insert Module"). Select code with `drag`, and write code
+  with `paste`, which uses the editor's Paste button. Typing code key by key is fragile: the
+  editor's autocomplete swallows keys, and every Return syntax-checks the line and may raise a
+  "Compile error" alert. Run a macro by clicking inside it and pressing "Run Sub/UserForm".
+- Excel's cell values are not exposed through accessibility. Use `read_screen_text` to read the
+  sheet.
+
+### Apple Numbers
+
+Table cells expose no text through accessibility. Read tables with `read_screen_text`.
 
 If an action reports success but the next state shows no change, retry that action once with
-`foreground: true` (brings the app forward and uses the real mouse/keyboard). Tell the user when
-you do this.
+`foreground: true`. Tell the user when you do this.
 
 A floating card (bottom-right, or another corner if it would cover the target window) shows
 the user a live thumbnail of the window being controlled, with recent apps stacked behind it. It
