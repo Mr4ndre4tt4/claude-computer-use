@@ -78,6 +78,16 @@ claude plugin install computer-use@claude-computer-use
 
 Você também pode instalar pelo comando `/plugin` dentro do Claude Code. O binário universal (Apple Silicon + Intel) já vem no repositório em `bin/`. Se estiver faltando, ele é compilado no primeiro uso, o que exige as Xcode Command Line Tools.
 
+### Cowork e outras superfícies do app Claude (extensão `.mcpb`)
+
+O Cowork não usa plugins do Claude Code; ele usa servidores MCP locais instalados como **extensão** do app Claude. Para isso, gere a extensão, que já leva o servidor dentro:
+
+```bash
+./scripts/build.sh && ./scripts/pack-mcpb.sh
+```
+
+Dê dois cliques em `dist/mac-computer-use.mcpb` (ou arraste o arquivo para **Ajustes → Extensões** no app Claude) e confirme a instalação. Para o fluxo de uso, instale também a skill `skills/mac-computer-use` na sua conta. A cada nova versão, gere e instale o `.mcpb` de novo.
+
 ### Permissões (uma vez)
 
 Em **Ajustes do Sistema → Privacidade e Segurança**, ative estas duas permissões para o app que roda o Claude Code (Claude, Terminal, iTerm, VS Code…):

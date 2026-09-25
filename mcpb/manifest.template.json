@@ -1,0 +1,20 @@
+{
+  "manifest_version": "0.2",
+  "name": "mac-computer-use",
+  "display_name": "Mac Computer Use",
+  "version": "__VERSION__",
+  "description": "Controla apps nativos do macOS em segundo plano: acessibilidade, screenshots por janela, cliques e um teclado virtual próprio, sem mexer no seu mouse nem no seu foco.",
+  "author": { "name": "Enzo Andreatta", "email": "zoh.andreatta@gmail.com" },
+  "homepage": "https://github.com/Mr4ndre4tt4/claude-computer-use",
+  "repository": { "type": "git", "url": "https://github.com/Mr4ndre4tt4/claude-computer-use" },
+  "license": "MIT",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/computer-use-server",
+    "mcp_config": {
+      "command": "${__dirname}/server/computer-use-server",
+      "args": []
+    }
+  },
+  "compatibility": { "platforms": ["darwin"] }
+}
