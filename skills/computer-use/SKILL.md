@@ -17,7 +17,8 @@ Use these for native apps or when the other routes can't reach the UI.
    use `list_apps` only when you can't tell which app is meant.
 2. Act with `element_index` from the latest state (`click`, `set_value`, `select_text`,
    `perform_secondary_action`, `scroll`), or with `type_text` / `press_key` / `paste`.
-3. `get_app_state` again before deciding the next step. After the first call it returns a
+3. `get_app_state` again before deciding the next step. It waits for the app's own "UI
+   changed" notifications to go quiet, so it is fast right after an action. After the first call it returns a
    **diff** (`+` added, `~` changed, `-` removed). Indices are stable: an element keeps its
    number while it exists, so unchanged elements remain usable. Pass `disable_diff: true` if
    you lost track.
@@ -47,18 +48,25 @@ All input goes to the target app **without moving the user's cursor or bringing 
 forward**:
 - Clicks use accessibility (Press / focus / select). Coordinate clicks hit-test the element under
   the point first. Only if nothing pressable is there are mouse events posted to the app's process.
-- Typing into native fields inserts text directly. Keys are posted to the app's process.
-- Chromium/Electron/Firefox apps ignore background keys, so keystrokes borrow focus for about
-  0.2 s and then hand it back to the app the user was using.
+- Typing (and plain-text `paste`) into native fields inserts text directly, without touching the
+  clipboard. Plain keys (Return, Tab, arrows, letters) are posted to the app's process.
+- Two cases briefly borrow focus (~0.2 s, then hand it back to the user's app): menu shortcuts
+  with Cmd/Ctrl (they act on the key window, which only an active app has), and any keys for
+  Chromium/Electron/Firefox apps. To avoid even that flicker, prefer the accessibility route when
+  there is one: `click` the window's closeButton instead of `super+w`, a menu item from
+  `find_elements` instead of its shortcut, `set_value` instead of select-all + typing.
 - If an app steals focus by itself, focus is handed back.
+- If an app stops responding, tools fail in about a second with a clear message. Wait and retry,
+  and never force-quit the user's apps on your own.
 
 If an action reports success but the next state shows no change, retry that action once with
 `foreground: true` (brings the app forward and uses the real mouse/keyboard). Tell the user when
 you do this.
 
-A small card in the bottom-right corner shows the user a live thumbnail of the window being
-controlled, the current action and where clicks land. It never takes focus and never appears in
-screenshots.
+A floating card (bottom-right, or another corner if it would cover the target window) shows
+the user a live thumbnail of the window being controlled, with recent apps stacked behind it. It
+also shows a ghost cursor gliding to each target, the element outlined, and the current action.
+It never takes focus, fades when the pointer is over it, and never appears in screenshots.
 
 ## Share window (scope lock)
 

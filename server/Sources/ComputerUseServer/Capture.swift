@@ -10,8 +10,18 @@ enum Capture {
     static var hasPermission: Bool { CGPreflightScreenCaptureAccess() }
 
     /// Captures the app window closest to `target` (screen points). Works for occluded windows.
-    static func window(pid: pid_t, near target: CGRect, maxEdge: CGFloat = Capture.maxEdge) async throws -> (CGImage, CGRect) {
+    private static var cachedContent: (SCShareableContent, Date)?
+
+    /// Window list lookups are the slow part of a capture; the live view may reuse a recent one.
+    private static func shareableContent(maxAge: TimeInterval) async throws -> SCShareableContent {
+        if maxAge > 0, let (content, time) = cachedContent, Date().timeIntervalSince(time) < maxAge { return content }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+        cachedContent = (content, Date())
+        return content
+    }
+
+    static func window(pid: pid_t, near target: CGRect, maxEdge: CGFloat = Capture.maxEdge, cacheAge: TimeInterval = 0) async throws -> (CGImage, CGRect) {
+        let content = try await shareableContent(maxAge: cacheAge)
         let candidates = content.windows.filter {
             $0.owningApplication?.processID == pid && $0.windowLayer == 0 && $0.frame.width > 20 && $0.frame.height > 20
         }

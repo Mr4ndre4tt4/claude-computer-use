@@ -17,14 +17,21 @@ final class Engine {
         guard Sharing.shared.allows(pid: running.processIdentifier) else {
             throw ToolError("\(running.localizedName ?? app) is outside the shared windows. \(Sharing.shared.describe())\nAsk the user to share it (share_window) or clear the share.")
         }
-        if let existing = sessions[running.processIdentifier] { return existing }
+        if let existing = sessions[running.processIdentifier] {
+            guard existing.isResponsive else { throw notResponding(existing) }
+            return existing
+        }
         let session = Session(app: running)
         sessions[running.processIdentifier] = session
         // Chromium/Electron only build their web accessibility tree when asked.
-        if session.appElement.set("AXManualAccessibility", kCFBooleanTrue) == .success {
+        if session.appElement.set("AXManualAccessibility", kCFBooleanTrue) == .success, session.needsFocusForKeys {
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
         return session
+    }
+
+    private func notResponding(_ session: Session) -> ToolError {
+        ToolError("\(session.name) is not responding (busy or hung). Wait a moment and retry; if it stays stuck, tell the user rather than force-quitting it.")
     }
 
     private func element(_ session: Session, _ index: Int) throws -> AXUIElement {
@@ -36,9 +43,21 @@ final class Engine {
 
     private func markAction() { lastAction = Date() }
 
-    private func settle() async {
-        let elapsed = Date().timeIntervalSince(lastAction)
-        if elapsed < 0.6 { try? await Task.sleep(nanoseconds: UInt64((0.6 - elapsed) * 1_000_000_000)) }
+    /// Waits until the app has stopped changing after the last action: at least a short reaction
+    /// window, then 250 ms without accessibility notifications (capped). Returns immediately when
+    /// nothing was done recently.
+    private func settle(_ session: Session, cap: Double = 3) async {
+        let sinceAction = Date().timeIntervalSince(lastAction)
+        guard sinceAction < 5 else { return }
+        let reaction = session.observing ? 0.2 : 0.6
+        if sinceAction < reaction {
+            try? await Task.sleep(nanoseconds: UInt64((reaction - sinceAction) * 1_000_000_000))
+        }
+        guard session.observing else { return }
+        let deadline = Date().addingTimeInterval(cap)
+        while Date() < deadline, Date().timeIntervalSince(session.lastChange) < 0.25 {
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
     }
 
     /// Brings the app (and the window we last looked at) to the front before synthetic input.
@@ -46,9 +65,8 @@ final class Engine {
         if !session.isFrontmost {
             session.appElement.set("AXFrontmost", kCFBooleanTrue)
             if !session.isFrontmost { session.app.activate() }
-            for _ in 0..<30 where !session.isFrontmost {
-                try? await Task.sleep(nanoseconds: 50_000_000)
-            }
+            let deadline = Date().addingTimeInterval(1.5)
+            while !session.isFrontmost && Date() < deadline { try? await Task.sleep(nanoseconds: 25_000_000) }
         }
         if let window = session.window {
             window.perform("AXRaise")
@@ -74,7 +92,7 @@ final class Engine {
 
     func getAppState(app: String, disableDiff: Bool, screenshot: Bool, window: String?) async throws -> [Content] {
         let session = try await self.session(app, launch: true)
-        await settle()
+        await settle(session)
 
         func refreshWindow() {
             session.window = session.pickWindow(window)
@@ -82,18 +100,25 @@ final class Engine {
         }
         refreshWindow()
         var collected = session.collect(expandAll: false, maxNodes: 1500, maxVisit: 10_000)
+        if collected.unresponsive && collected.nodes.isEmpty { throw notResponding(session) }
 
-        // Wait for the UI to settle after recent actions or while something is loading.
-        let recent = Date().timeIntervalSince(lastAction) < 5
-        if recent || collected.busy {
-            let deadline = Date().addingTimeInterval(collected.busy ? 5 : 2.5)
+        // Without notifications, confirm stability by comparing two reads; either way keep waiting
+        // (up to 5 s) while the app shows a loading indicator.
+        let needsCheck = !session.observing && Date().timeIntervalSince(lastAction) < 5
+        if needsCheck || collected.busy {
+            let deadline = Date().addingTimeInterval(5)
             while Date() < deadline {
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                if session.observing {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    await settle(session, cap: 1)
+                } else {
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                }
                 refreshWindow()
                 let next = session.collect(expandAll: false, maxNodes: 1500, maxVisit: 10_000)
                 let stable = next.signature == collected.signature
                 collected = next
-                if stable && !collected.busy { break }
+                if (stable || session.observing) && !collected.busy { break }
             }
         }
 
@@ -158,6 +183,7 @@ final class Engine {
         }
         if let focusedIndex { header.append("Focused element: [\(focusedIndex)]") }
         if collected.busy { header.append("Note: the app still shows a loading indicator.") }
+        if collected.unresponsive { header.append("Note: the app stopped answering mid-read; the tree may be partial.") }
         header += notes
 
         var body: String
@@ -198,7 +224,7 @@ final class Engine {
 
     func findElements(app: String, query: String, role: String?, limit: Int) async throws -> [Content] {
         let session = try await self.session(app, launch: true)
-        await settle()
+        await settle(session)
         if session.window == nil {
             session.window = session.pickWindow(nil)
             session.windowFrame = session.window?.frame
@@ -258,30 +284,46 @@ final class Engine {
         return front
     }
 
+    /// Hands focus back to the user's app if the target grabbed it. Checks now and again shortly
+    /// after (apps often activate themselves a beat later), without delaying the tool result.
     private func giveFocusBack(to app: NSRunningApplication?, from session: Session) async {
         guard let app, !app.isTerminated else { return }
-        try? await Task.sleep(nanoseconds: 120_000_000)
-        guard session.isFrontmost else { return }
-        AXUIElementCreateApplication(app.processIdentifier).set("AXFrontmost", kCFBooleanTrue)
-        if !app.isActive { app.activate() }
+        func restoreIfNeeded() {
+            guard session.isFrontmost, !app.isTerminated else { return }
+            AXUIElementCreateApplication(app.processIdentifier).set("AXFrontmost", kCFBooleanTrue)
+            if !app.isActive { app.activate() }
+        }
+        restoreIfNeeded()
+        Task { @MainActor in
+            for delay: UInt64 in [150_000_000, 350_000_000] {
+                try? await Task.sleep(nanoseconds: delay)
+                restoreIfNeeded()
+            }
+        }
     }
 
     /// Runs keyboard input. Background by default; apps that ignore background keys get a brief
     /// focus borrow (~0.2 s) and the user's app is re-activated right after.
-    private func withKeyboard(_ session: Session, foreground: Bool, _ body: (pid_t?) -> Void) async -> String {
+    private func withKeyboard(_ session: Session, foreground: Bool, needsKeyWindow: Bool = false, _ body: (pid_t?) -> Void) async -> String {
         let previous = userFrontmost(excluding: session)
         if foreground {
             await activate(session)
             body(nil)
             return " (foreground)"
         }
-        if session.needsFocusForKeys && !session.isFrontmost {
+        if (session.needsFocusForKeys || needsKeyWindow) && !session.isFrontmost {
             session.appElement.set("AXFrontmost", kCFBooleanTrue)
-            for _ in 0..<20 where !session.isFrontmost { try? await Task.sleep(nanoseconds: 25_000_000) }
+            if let window = session.window {
+                window.perform("AXRaise")
+                window.set("AXMain", kCFBooleanTrue)
+            }
+            if !session.isFrontmost { session.app.activate() }
+            let deadline = Date().addingTimeInterval(0.5)
+            while !session.isFrontmost && Date() < deadline { try? await Task.sleep(nanoseconds: 15_000_000) }
             body(session.pid)
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            try? await Task.sleep(nanoseconds: 100_000_000)
             await giveFocusBack(to: previous, from: session)
-            return " (focus borrowed briefly and returned; mouse untouched)"
+            return " (focus borrowed ~0.2s, then returned)"
         }
         body(session.pid)
         await giveFocusBack(to: previous, from: session)
@@ -289,7 +331,7 @@ final class Engine {
     }
 
     private func modeNote(_ foreground: Bool) -> String {
-        foreground ? " (foreground)" : " (background; if nothing changed, retry with foreground=true)"
+        foreground ? " (foreground)" : " (background)"
     }
 
     func click(app: String, index: Int?, x: Double?, y: Double?, button: MouseButtonKind, count: Int, foreground: Bool) async throws -> String {
@@ -304,26 +346,28 @@ final class Engine {
     private func clickInner(_ session: Session, index: Int?, x: Double?, y: Double?, button: MouseButtonKind, count: Int, foreground: Bool) async throws -> String {
         var point: CGPoint
         var label: String
+        var targetRect: CGRect?
         if let index {
             let el = try element(session, index)
             let actions = el.actionNames
             let name = session.info[index]?.label.map { Session.quote($0, max: 40) } ?? "[\(index)]"
             if !foreground, count == 1, button == .left, actions.contains("AXPress"), el.perform("AXPress") == .success {
-                Overlay.shared.report(session, "Pressed \(name)", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) })
-                return "Pressed [\(index)] via accessibility (background, no mouse movement)."
+                Overlay.shared.report(session, "Pressed \(name)", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) }, rect: el.frame)
+                return "Pressed [\(index)]."
             }
             if !foreground, count == 1, button == .right, actions.contains("AXShowMenu"), el.perform("AXShowMenu") == .success {
-                Overlay.shared.report(session, "Opened menu of \(name)", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) })
+                Overlay.shared.report(session, "Opened menu of \(name)", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) }, rect: el.frame)
                 return "Opened the context menu of [\(index)]."
             }
             guard let center = await center(session, index, el) else {
                 throw ToolError("Element [\(index)] has no on-screen frame. Try perform_secondary_action or x/y.")
             }
             point = center
+            targetRect = el.frame
             label = "Clicked \(name)"
             if !foreground, count == 1, button == .left, ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"].contains(session.info[index]?.role ?? ""),
                el.set("AXFocused", kCFBooleanTrue) == .success, el.bool("AXFocused") == true {
-                Overlay.shared.report(session, "Focused \(name)", at: point)
+                Overlay.shared.report(session, "Focused \(name)", at: point, rect: targetRect)
                 return "Focused [\(index)] (background, no mouse movement)."
             }
         } else {
@@ -332,9 +376,9 @@ final class Engine {
             guard Displays.contains(point) else { throw ToolError("(\(x), \(y)) maps outside every display. Refresh get_app_state.") }
             label = "Clicked at (\(Int(x)), \(Int(y)))"
         }
-        Overlay.shared.report(session, label, at: point)
+        Overlay.shared.report(session, label, at: point, rect: targetRect)
         if !foreground, let how = accessibilityClick(session, at: point, button: button, count: count) {
-            return "\(label) — \(how) (background, no mouse movement)."
+            return "\(label) — \(how)."
         }
         if let pid = await deliver(session, foreground: foreground) {
             Input.backgroundClick(pid: pid, at: point, button: button, count: count)
@@ -406,17 +450,15 @@ final class Engine {
            focused.isSettable("AXSelectedText"), !isInWebContent(focused) {
             // Native text views: insert at the caret through accessibility. Newlines/tabs are still keys.
             var segment = ""
-            func flush() {
+            @MainActor func flush() {
                 if !segment.isEmpty { focused.set("AXSelectedText", segment as CFString) }
                 segment = ""
             }
             for char in text {
-                if char == "\n" || char == "\r\n" || char == "\r" {
+                if char == "\n" || char == "\r\n" || char == "\r" || char == "\t" {
                     flush()
-                    Input.press(KeyStroke(code: 36), to: session.pid)
-                } else if char == "\t" {
-                    flush()
-                    Input.press(KeyStroke(code: 48), to: session.pid)
+                    let key = KeyStroke(code: char == "\t" ? 48 : 36)
+                    _ = await withKeyboard(session, foreground: false) { Input.press(key, to: $0) }
                 } else {
                     segment.append(char)
                 }
@@ -433,7 +475,9 @@ final class Engine {
         let session = try await self.session(app, launch: false)
         defer { markAction() }
         Overlay.shared.report(session, "Pressed \(key)", at: nil)
-        let how = await withKeyboard(session, foreground: foreground) { Input.press(stroke, to: $0) }
+        // Menu shortcuts (Cmd/Ctrl+…) act on the key window, which only an active app has.
+        let isShortcut = stroke.modifiers.contains { $0.flag == .maskCommand || $0.flag == .maskControl }
+        let how = await withKeyboard(session, foreground: foreground, needsKeyWindow: isShortcut) { Input.press(stroke, to: $0) }
         return "Pressed \(key)\(how)."
     }
 
@@ -441,10 +485,17 @@ final class Engine {
         let session = try await self.session(app, launch: false)
         defer { markAction() }
         Overlay.shared.report(session, "Pasting \(text.count) characters", at: nil)
+        // Plain text into a native field: insert directly, leaving the clipboard alone.
+        if !foreground, format.lowercased() == "text" || format.isEmpty,
+           let focused = session.appElement.element("AXFocusedUIElement"),
+           focused.isSettable("AXSelectedText"), !isInWebContent(focused),
+           focused.set("AXSelectedText", text as CFString) == .success {
+            return "Inserted \(text.count) character(s) into the focused field (background, clipboard untouched)."
+        }
         let saved = Clipboard.save()
         try Clipboard.put(text, format: format)
         let stroke = try Input.parse("super+v")
-        let how = await withKeyboard(session, foreground: foreground) { Input.press(stroke, to: $0) }
+        let how = await withKeyboard(session, foreground: foreground, needsKeyWindow: true) { Input.press(stroke, to: $0) }
         // Give the app time to read the pasteboard before restoring the user's clipboard.
         try? await Task.sleep(nanoseconds: 600_000_000)
         Clipboard.restore(saved)
@@ -547,7 +598,7 @@ final class Engine {
             if el.set("AXValue", newValue) == .success {
                 let readBack = el.str("AXValue")
                 if readBack == nil || readBack == value || Double(readBack ?? "") == Double(value) {
-                    Overlay.shared.report(session, "Set value of [\(index)]", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) })
+                    Overlay.shared.report(session, "Set value of [\(index)]", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) }, rect: el.frame)
                     return "Set the value of [\(index)]."
                 }
             }
@@ -575,7 +626,7 @@ final class Engine {
         }
         let status = el.perform(match)
         guard status == .success else { throw ToolError("\(AX.displayAction(match)) failed (AXError \(status.rawValue)).") }
-        Overlay.shared.report(session, "\(AX.displayAction(match)) on [\(index)]", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) })
+        Overlay.shared.report(session, "\(AX.displayAction(match)) on [\(index)]", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) }, rect: el.frame)
         return "Performed \(AX.displayAction(match)) on [\(index)]."
     }
 

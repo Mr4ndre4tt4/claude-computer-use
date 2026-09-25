@@ -110,9 +110,11 @@ extension AXUIElement {
     }
 
     /// Fetches many attributes in one IPC round trip; missing ones come back nil.
-    func multi(_ names: [String]) -> [CFTypeRef?] {
+    /// Returns nil when the app does not answer (hung or busy), so callers can stop early.
+    func multi(_ names: [String]) -> [CFTypeRef?]? {
         var out: CFArray?
         let status = AXUIElementCopyMultipleAttributeValues(self, names as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &out)
+        if status == .cannotComplete { return nil }
         guard status == .success, let values = out as? [AnyObject], values.count == names.count else {
             return names.map { raw($0) }
         }

@@ -24,10 +24,19 @@ Plugin de [Claude Code](https://claude.com/claude-code) que permite ao Claude op
 
 - **Não intrusivo.**
   - Os cliques usam a acessibilidade do app, e cliques por coordenada identificam o elemento naquele ponto e o acionam da mesma forma.
-  - O teclado vai direto para o processo do app.
-  - Chrome, Electron e Firefox ignoram teclado em segundo plano. Nesses apps o foco é emprestado por cerca de 0,2 s e devolvido na hora.
+  - A digitação e a colagem de texto simples em campos nativos são inseridas direto, sem usar o clipboard.
+  - Teclas simples vão direto para o processo do app.
+  - Dois casos pegam o foco por cerca de 0,2 s e devolvem na hora: atalhos com Cmd/Ctrl, que agem sobre a janela ativa e por regra do AppKit exigem o app ativo, e o teclado em Chrome, Electron e Firefox.
   - Se um app roubar o foco sozinho, o plugin devolve o foco para você.
-- **Visão ao vivo.** Um card flutuante no canto inferior direito mostra a miniatura da janela controlada, a ação atual e um pulso onde o clique caiu. Ele não recebe foco, deixa os cliques passarem e não aparece nos screenshots. Para desligar, use `COMPUTER_USE_HUD=0`.
+- **Rápido.** Em vez de esperas fixas, o plugin escuta as notificações de mudança de interface do app e lê a tela assim que ela para de mudar.
+  - Ler a tela logo depois de uma ação leva cerca de 0,3 s. Um clique leva cerca de 40 ms.
+  - Se o app travar, o erro aparece em cerca de 1 s, sem ficar preso esperando.
+- **Visão ao vivo, no estilo Codex.** Um card flutuante mostra:
+  - a miniatura ao vivo da janela controlada, com os apps anteriores empilhados atrás;
+  - um cursor fantasma que desliza até o alvo, com o elemento destacado e um pulso no clique;
+  - uma pílula com o app e a ação atual.
+
+  O card não recebe foco, esmaece quando você passa o mouse por cima, troca de canto se estiver cobrindo a janela controlada e não aparece nos screenshots. Para desligar, use `COMPUTER_USE_HUD=0`.
 - **Share window.** Você escolhe a janela no seletor do sistema e o Claude fica restrito a ela.
 - **Econômico em tokens.**
   - Contêineres anônimos são achatados e textos duplicados são omitidos.

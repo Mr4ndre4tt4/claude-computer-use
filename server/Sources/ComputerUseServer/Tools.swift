@@ -190,7 +190,7 @@ final class Tools {
     private func tool(_ name: String, _ description: String, _ properties: JSON, _ required: [String], action: Bool = false) -> JSON {
         var props = properties
         if Tools.inputTools.contains(name) {
-            props["foreground"] = prop("boolean", "Default false: events go straight to the app in the background (user's cursor and focus untouched). Set true only if a background attempt had no effect; it brings the app forward and uses the real mouse/keyboard.")
+            props["foreground"] = prop("boolean", "Default false: input goes to the app in the background (user's cursor and focus untouched). Set true only if a background attempt visibly had no effect; it brings the app forward and uses the real mouse/keyboard.")
         }
         if action {
             props["then_get_state"] = prop("boolean", "Return the refreshed app state (diff + screenshot) right after the action, saving a get_app_state round trip.")

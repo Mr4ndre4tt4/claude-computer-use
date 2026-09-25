@@ -31,6 +31,7 @@ struct NodeInfo {
 
 struct Collected {
     var nodes: [NodeInfo] = []
+    var unresponsive = false
     var truncated = false
     var busy = false
     var signature = 0
@@ -57,14 +58,55 @@ final class Session {
     /// Screenshot pixels per screen point.
     var scale: CGFloat = 1
 
+    /// Last time the app reported a UI change through accessibility notifications.
+    var lastChange = Date.distantPast
+    private(set) var observing = false
+    private var observer: AXObserver?
+
     init(app: NSRunningApplication) {
         self.app = app
         pid = app.processIdentifier
         appElement = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appElement, 3)
+        AXUIElementSetMessagingTimeout(appElement, 1.5)
+        startObserving()
+    }
+
+    /// Subscribes to the app's UI-change notifications so waits end as soon as the UI is quiet,
+    /// instead of sleeping for a fixed time.
+    private func startObserving() {
+        let callback: AXObserverCallback = { _, _, _, refcon in
+            guard let refcon else { return }
+            let session = Unmanaged<Session>.fromOpaque(refcon).takeUnretainedValue()
+            MainActor.assumeIsolated { session.lastChange = Date() }
+        }
+        var created: AXObserver?
+        guard AXObserverCreate(pid, callback, &created) == .success, let created else { return }
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        let notifications = [
+            "AXValueChanged", "AXUIElementDestroyed", "AXCreated", "AXFocusedUIElementChanged",
+            "AXLayoutChanged", "AXTitleChanged", "AXSelectedChildrenChanged", "AXSelectedTextChanged",
+            "AXWindowCreated", "AXFocusedWindowChanged", "AXMainWindowChanged", "AXMenuOpened", "AXMenuClosed",
+            "AXRowCountChanged", "AXSheetCreated", "AXLoadComplete", "AXElementBusyChanged",
+        ]
+        var registered = 0
+        for name in notifications where AXObserverAddNotification(created, appElement, name as CFString, refcon) == .success {
+            registered += 1
+        }
+        guard registered > 0 else { return }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .defaultMode)
+        observer = created
+        observing = true
     }
 
     var name: String { app.localizedName ?? "pid \(pid)" }
+
+    /// Quick liveness probe so a hung app fails in about a second instead of timing out per element.
+    var isResponsive: Bool {
+        let probe = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(probe, 1)
+        var value: CFTypeRef?
+        return AXUIElementCopyAttributeValue(probe, "AXRole" as CFString, &value) != .cannotComplete
+    }
 
     /// Chromium/Electron (and Firefox) drop keyboard events delivered to an inactive app, so for
     /// them keystrokes briefly borrow focus. AppKit apps accept them fully in the background.
@@ -79,7 +121,8 @@ final class Session {
               let items = try? FileManager.default.contentsOfDirectory(atPath: frameworks.path) else { return false }
         return items.contains { $0.hasPrefix("Electron Framework") || $0.contains("Chromium Embedded") || $0.contains("Chrome Framework") }
     }()
-    var isFrontmost: Bool { appElement.bool("AXFrontmost") ?? app.isActive }
+    /// Asks the window server, not the app, so it answers instantly even while the app is busy.
+    var isFrontmost: Bool { NSWorkspace.shared.frontmostApplication?.processIdentifier == pid }
 
     // MARK: Windows
 
@@ -185,9 +228,9 @@ final class Session {
         }.sorted { $0.1 < $1.1 }
         for (root, _) in ranked {
             walker.visit(root, depth: 0, parentLabel: nil, level: 0)
-            if walker.truncated { break }
+            if walker.truncated || walker.unresponsive { break }
         }
-        return Collected(nodes: walker.nodes, truncated: walker.truncated, busy: walker.busy,
+        return Collected(nodes: walker.nodes, unresponsive: walker.unresponsive, truncated: walker.truncated, busy: walker.busy,
                          signature: walker.hasher.finalize())
     }
 
@@ -308,6 +351,7 @@ final class Walker {
     var visited = 0
     var truncated = false
     var busy = false
+    var unresponsive = false
     var hasher = Hasher()
 
     let maxNodes: Int
@@ -340,7 +384,11 @@ final class Walker {
         if level > 80 { return }
         visited += 1
 
-        let v = el.multi(Session.attributeNames)
+        guard let v = el.multi(Session.attributeNames) else {
+            unresponsive = true
+            truncated = true
+            return
+        }
         let role = AX.string(v[0]) ?? "AXUnknown"
         if Session.skipRoles.contains(role) { return }
         let subrole = AX.string(v[1])
