@@ -27,13 +27,33 @@ jobs:
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
             | COMPUTER_USE_HUD=0 bin/computer-use-server | tail -1 | python3 -c 'import sys,json; t=json.loads(sys.stdin.read())["result"]["tools"]; print(len(t), "tools"); assert len(t) > 15'
 
+      - name: Cowork extension is in sync with the plugin version
+        run: |
+          want=$(python3 -c 'import json; print(json.load(open(".claude-plugin/plugin.json"))["version"])')
+          have=$(unzip -p cowork/mac-computer-use.mcpb manifest.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["version"])')
+          echo "plugin $want, committed extension $have"
+          test "$want" = "$have" || { echo "Run scripts/pack-mcpb.sh and commit cowork/"; exit 1; }
+
+      - name: Pack and validate the Cowork extension
+        run: |
+          scripts/pack-mcpb.sh
+          mkdir -p /tmp/mcpb && unzip -o -q cowork/mac-computer-use.mcpb -d /tmp/mcpb
+          npx -y @anthropic-ai/mcpb validate /tmp/mcpb/manifest.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: computer-use-server
           path: bin/computer-use-server
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cowork-extension
+          path: |
+            cowork/mac-computer-use.mcpb
+            cowork/mac-computer-use-skill.zip
+
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" bin/computer-use-server --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" bin/computer-use-server cowork/mac-computer-use.mcpb cowork/mac-computer-use-skill.zip --generate-notes

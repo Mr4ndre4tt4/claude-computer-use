@@ -78,15 +78,15 @@ claude plugin install computer-use@claude-computer-use
 
 Você também pode instalar pelo comando `/plugin` dentro do Claude Code. O binário universal (Apple Silicon + Intel) já vem no repositório em `bin/`. Se estiver faltando, ele é compilado no primeiro uso, o que exige as Xcode Command Line Tools.
 
-### Cowork e outras superfícies do app Claude (extensão `.mcpb`)
+### Cowork e outras superfícies do app Claude
 
-O Cowork não usa plugins do Claude Code; ele usa servidores MCP locais instalados como **extensão** do app Claude. Para isso, gere a extensão, que já leva o servidor dentro:
+O Cowork usa uma **extensão** do app Claude, não o plugin. A extensão e a skill já vêm prontas em [`cowork/`](cowork/README.md):
 
 ```bash
-./scripts/build.sh && ./scripts/pack-mcpb.sh
+./cowork/install.sh
 ```
 
-Dê dois cliques em `dist/mac-computer-use.mcpb` (ou arraste o arquivo para **Ajustes → Extensões** no app Claude) e confirme a instalação. Para o fluxo de uso, instale também a skill `skills/mac-computer-use` na sua conta. A cada nova versão, gere e instale o `.mcpb` de novo.
+O passo a passo completo está em [cowork/README.md](cowork/README.md). O plugin do Claude Code e a extensão podem ficar instalados ao mesmo tempo.
 
 ### Permissões (uma vez)
 
@@ -111,7 +111,9 @@ cd server && swift test --scratch-path /tmp/cu-tests
 
 Usar uma pasta de build fora de `~/Documents` evita um erro de assinatura causado pelos atributos estendidos do iCloud.
 
-O GitHub Actions compila e testa a cada push. Ao criar uma tag `v*`, ele publica uma release com o binário. O código fica em `server/Sources/ComputerUseServer/`:
+Para a extensão do Cowork, rode `scripts/pack-mcpb.sh` depois do build e faça o commit de `cowork/` junto com `bin/`.
+
+O GitHub Actions compila e testa a cada push. Ele também confere se a extensão em `cowork/` está na mesma versão do plugin e valida o manifesto. Ao criar uma tag `v*`, ele publica uma release com o binário, a extensão `.mcpb` e a skill em zip. O código fica em `server/Sources/ComputerUseServer/`:
 
 - `Server.swift`: protocolo MCP (JSON-RPC via stdio).
 - `Tools.swift`: definição das ferramentas e despacho.
