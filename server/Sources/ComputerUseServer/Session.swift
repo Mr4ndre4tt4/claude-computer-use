@@ -31,6 +31,8 @@ struct NodeInfo {
 
 struct Collected {
     var nodes: [NodeInfo] = []
+    /// Containers skipped because they were entirely outside the visible area.
+    var hiddenOffscreen = 0
     var unresponsive = false
     var truncated = false
     var busy = false
@@ -50,6 +52,7 @@ final class Session {
     var info: [Int: NodeInfo] = [:]
     var baseline: [Int: String]?
     var nextIndex = 1
+    var hasShownScreenshot = false
 
     var window: AXUIElement?
     var windowFrame: CGRect?
@@ -96,6 +99,14 @@ final class Session {
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .defaultMode)
         observer = created
         observing = true
+    }
+
+    /// Detaches the notification observer (called when the app quits).
+    func stopObserving() {
+        guard let observer else { return }
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        self.observer = nil
+        observing = false
     }
 
     var name: String { app.localizedName ?? "pid \(pid)" }
@@ -210,9 +221,9 @@ final class Session {
 
     static let noiseActions: Set<String> = ["AXScrollToVisible", "AXShowMenu", "AXShowDefaultUI", "AXShowAlternateUI"]
 
-    func collect(expandAll: Bool, maxNodes: Int, maxVisit: Int) -> Collected {
+    func collect(expandAll: Bool, maxNodes: Int, maxVisit: Int, pruneOffscreen: Bool = false) -> Collected {
         let walker = Walker(
-            maxNodes: maxNodes, maxVisit: maxVisit, expandAll: expandAll,
+            maxNodes: maxNodes, maxVisit: maxVisit, expandAll: expandAll, pruneOffscreen: pruneOffscreen,
             focused: appElement.element("AXFocusedUIElement").map(ElementKey.init),
             chosen: window.map(ElementKey.init), windowFrame: windowFrame
         )
@@ -227,10 +238,11 @@ final class Session {
             return (el, role.contains("MenuBar") ? 2 : (role == "AXWindow" ? 0 : 1))
         }.sorted { $0.1 < $1.1 }
         for (root, _) in ranked {
-            walker.visit(root, depth: 0, parentLabel: nil, level: 0)
+            walker.visit(root, depth: 0, parentLabel: nil, level: 0, clip: nil)
             if walker.truncated || walker.unresponsive { break }
         }
-        return Collected(nodes: walker.nodes, unresponsive: walker.unresponsive, truncated: walker.truncated, busy: walker.busy,
+        return Collected(nodes: walker.nodes, hiddenOffscreen: walker.hiddenOffscreen, unresponsive: walker.unresponsive,
+                         truncated: walker.truncated, busy: walker.busy,
                          signature: walker.hasher.finalize())
     }
 
@@ -352,19 +364,22 @@ final class Walker {
     var truncated = false
     var busy = false
     var unresponsive = false
+    var hiddenOffscreen = 0
     var hasher = Hasher()
 
     let maxNodes: Int
     let maxVisit: Int
     let expandAll: Bool
+    let pruneOffscreen: Bool
     let focused: ElementKey?
     let chosen: ElementKey?
     let windowFrame: CGRect?
 
-    init(maxNodes: Int, maxVisit: Int, expandAll: Bool, focused: ElementKey?, chosen: ElementKey?, windowFrame: CGRect?) {
+    init(maxNodes: Int, maxVisit: Int, expandAll: Bool, pruneOffscreen: Bool, focused: ElementKey?, chosen: ElementKey?, windowFrame: CGRect?) {
         self.maxNodes = maxNodes
         self.maxVisit = maxVisit
         self.expandAll = expandAll
+        self.pruneOffscreen = pruneOffscreen
         self.focused = focused
         self.chosen = chosen
         self.windowFrame = windowFrame
@@ -376,7 +391,8 @@ final class Walker {
         return t.isEmpty ? nil : s
     }
 
-    func visit(_ el: AXUIElement, depth: Int, parentLabel: String?, level: Int) {
+    /// `clip` is the visible area inherited from the enclosing window and scroll areas.
+    func visit(_ el: AXUIElement, depth: Int, parentLabel: String?, level: Int, clip: CGRect?) {
         if nodes.count >= maxNodes || visited >= maxVisit {
             truncated = true
             return
@@ -418,9 +434,24 @@ final class Walker {
         let collapsed = isWindowLike && !expandAll && chosen != nil && key != chosen
             && (subrole ?? "AXStandardWindow") == "AXStandardWindow"
 
+        // Visibility is judged against the element's own window (not just the captured one) and
+        // any scroll area around it, so floating panels and scrolled-away content are handled right.
         var offscreen = false
-        if let windowFrame, let frame, !isWindowLike, !role.hasPrefix("AXMenu") {
-            offscreen = frame.width <= 0 || frame.height <= 0 ? false : !frame.intersects(windowFrame)
+        if let clip, let frame, !isWindowLike, !role.hasPrefix("AXMenu"), frame.width > 0, frame.height > 0 {
+            offscreen = !frame.intersects(clip)
+        }
+        if offscreen && pruneOffscreen {
+            hiddenOffscreen += 1
+            return
+        }
+        var childClip = clip
+        if let frame, frame.width > 0, frame.height > 0 {
+            if isWindowLike || role == "AXSheet" || role == "AXDrawer" {
+                childClip = frame
+            } else if role == "AXScrollArea" || role == "AXWebArea" {
+                childClip = clip.map { $0.intersection(frame) } ?? frame
+                if childClip?.isNull == true { childClip = frame }
+            }
         }
 
         if role == "AXBusyIndicator" && !offscreen { busy = true }
@@ -459,7 +490,7 @@ final class Walker {
             break
         }
         for child in children {
-            visit(child, depth: childDepth, parentLabel: childParentLabel, level: level + 1)
+            visit(child, depth: childDepth, parentLabel: childParentLabel, level: level + 1, clip: childClip)
             if truncated { return }
         }
     }

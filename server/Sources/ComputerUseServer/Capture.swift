@@ -81,6 +81,22 @@ enum Capture {
         return (image, frame)
     }
 
+    /// Downscales so the longest edge is at most `maxEdge`.
+    static func fit(_ image: CGImage, maxEdge: CGFloat) -> CGImage {
+        let width = CGFloat(image.width)
+        let height = CGFloat(image.height)
+        let scale = min(1, maxEdge / max(width, height))
+        guard scale < 1 else { return image }
+        let newWidth = Int(width * scale)
+        let newHeight = Int(height * scale)
+        guard let context = CGContext(data: nil, width: newWidth, height: newHeight, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else { return image }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: newWidth, height: newHeight))
+        return context.makeImage() ?? image
+    }
+
     static func jpeg(_ image: CGImage, quality: CGFloat = 0.85) -> Data {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return Data() }

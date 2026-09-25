@@ -1,6 +1,6 @@
 ---
-name: computer-use
-description: Operate native macOS apps (Finder, Mail, Excel, Figma desktop, WhatsApp, System apps, any .app) by reading their UI and clicking/typing in the background. Use when a task needs an app's interface and no dedicated connector, API or CLI covers it — e.g. "open X in app Y", "fill this form in the app", "check what the app shows", "click through this flow".
+name: mac-computer-use
+description: (Computer use plugin, macOS) Operate native macOS apps (Finder, Mail, Excel, Figma desktop, WhatsApp, System apps, any .app) by reading their UI and clicking/typing in the background. Use when a task needs an app's interface and no dedicated connector, API or CLI covers it — e.g. "open X in app Y", "fill this form in the app", "check what the app shows", "click through this flow".
 ---
 
 # Computer Use (macOS)
@@ -24,12 +24,28 @@ Use these for native apps or when the other routes can't reach the UI.
    you lost track.
 
 Shortcuts:
+- `click(app, text: "Save")` clicks the control showing that text (accessibility match, OCR fallback)
+  without a separate lookup.
 - `then_get_state: true` on any action returns the refreshed state in the same call.
 - `batch` runs several steps in one call (e.g. `set_value` → `press_key Return` → `get_app_state`).
 - `find_elements(app, query, role?)` searches the whole tree, including closed menus, other
   windows and parts that were truncated. Menu items found there can be pressed without opening
   the menu.
-- `screenshot: false` on `get_app_state` saves tokens when the tree is enough.
+- Screenshots are automatic: sent when something changed, skipped when nothing did. Force with
+  `screenshot: true`, or skip with `false` when the tree is enough.
+- Content scrolled out of view is skipped. Scroll, use `find_elements`, or pass `include_offscreen: true`.
+
+More tools:
+- `wait_for(app, query, gone?)`: wait for something to appear or disappear (loads, dialogs), reacting
+  to the app's change notifications. Use it instead of polling with get_app_state or `wait`.
+- `read_text(app, element_index?)`: the full text of a document, email, page or field (the tree
+  truncates long values).
+- `read_screen_text(app, query?)`: on-device OCR with clickable coordinates, for canvases, games,
+  remote desktops, images and PDFs, or anything with poor accessibility.
+- `screenshot(app, element_index | region)`: zoomed, full-resolution crop for small text.
+- `select_menu(app, "File > Export As…")`: run a menu command by path.
+- `window(app, action)`: move, resize, minimize, restore, fullscreen, raise or close a window.
+- `open(target, app?)`: open a file, folder or URL in the background.
 
 ## Reading the tree
 
@@ -48,13 +64,20 @@ All input goes to the target app **without moving the user's cursor or bringing 
 forward**:
 - Clicks use accessibility (Press / focus / select). Coordinate clicks hit-test the element under
   the point first. Only if nothing pressable is there are mouse events posted to the app's process.
+  Success is checked through the app's change notifications. If nothing happened (Chromium,
+  Electron and SwiftUI ignore background pointer events), it automatically retries with a brief
+  borrow: app forward, real pointer, cursor put back, focus returned. Hover leaves the pointer in
+  place so menus stay open.
+- Scrolling sets the scroll bar through accessibility (exact, fully in the background). It only
+  falls back to wheel events where there is no accessible scroll bar.
 - Typing (and plain-text `paste`) into native fields inserts text directly, without touching the
   clipboard. Plain keys (Return, Tab, arrows, letters) are posted to the app's process.
 - Two cases briefly borrow focus (~0.2 s, then hand it back to the user's app): menu shortcuts
   with Cmd/Ctrl (they act on the key window, which only an active app has), and any keys for
   Chromium/Electron/Firefox apps. To avoid even that flicker, prefer the accessibility route when
-  there is one: `click` the window's closeButton instead of `super+w`, a menu item from
-  `find_elements` instead of its shortcut, `set_value` instead of select-all + typing.
+  there is one: `window(action: "close")` instead of `super+w`, `select_menu` instead of a
+  shortcut (app-wide commands run fully in the background), `set_value` instead of select-all +
+  typing.
 - If an app steals focus by itself, focus is handed back.
 - If an app stops responding, tools fail in about a second with a clear message. Wait and retry,
   and never force-quit the user's apps on your own.
@@ -85,8 +108,10 @@ sensitive sessions.
   apps may need `hover` with `foreground: true`.
 - Menus: `click` a `menuBarItem`, or `find_elements(query: "Save", role: "menuItem")` and click
   the result directly.
-- Canvas-heavy apps (Figma canvas, games, maps) expose little accessibility. Rely on the
-  screenshot and coordinate clicks, or use their dedicated tools (e.g. the Figma connector).
+- Canvas-heavy apps (Figma canvas, games, maps) expose little accessibility. get_app_state says
+  so. Use `read_screen_text` (OCR) and coordinate clicks, or their dedicated tools (e.g. the Figma
+  connector). The first OCR after boot can take ~30 s while the model loads; later calls take
+  ~0.2 s.
 - Permission errors: run `check_permissions`. Only the user can grant Accessibility and Screen
   Recording (System Settings → Privacy & Security). `prompt: true` opens the right pane.
 

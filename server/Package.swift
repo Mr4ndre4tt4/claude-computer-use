@@ -14,6 +14,11 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("ScreenCaptureKit"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "ComputerUseServerTests",
+            dependencies: ["computer-use-server"],
+            path: "Tests/ComputerUseServerTests"
+        ),
     ]
 )

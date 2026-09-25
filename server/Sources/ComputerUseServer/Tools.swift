@@ -49,7 +49,7 @@ final class Tools {
         do {
             var content = try await dispatch(name, args)
             if bool(args, "then_get_state") == true, name != "get_app_state", let app = string(args, "app") {
-                content += try await engine.getAppState(app: app, disableDiff: false, screenshot: true, window: nil)
+                content += try await engine.getAppState(app: app, disableDiff: false, screenshot: nil, window: nil, includeOffscreen: false)
             }
             return ["content": content.map(\.json), "isError": false]
         } catch let error as ToolError {
@@ -68,8 +68,9 @@ final class Tools {
             return try await engine.getAppState(
                 app: try required(a, "app"),
                 disableDiff: bool(a, "disable_diff") ?? bool(a, "disableDiff") ?? false,
-                screenshot: bool(a, "screenshot") ?? true,
-                window: string(a, "window") ?? int(a, "window").map(String.init)
+                screenshot: bool(a, "screenshot"),
+                window: string(a, "window") ?? int(a, "window").map(String.init),
+                includeOffscreen: bool(a, "include_offscreen") ?? false
             )
 
         case "find_elements":
@@ -82,7 +83,7 @@ final class Tools {
             let count = max(1, min(int(a, "click_count") ?? 1, 3))
             return [.text(try await engine.click(
                 app: try required(a, "app"), index: int(a, "element_index"), x: double(a, "x"), y: double(a, "y"),
-                button: try MouseButtonKind.parse(string(a, "mouse_button")), count: count, foreground: fg(a)
+                text: string(a, "text"), button: try MouseButtonKind.parse(string(a, "mouse_button")), count: count, foreground: fg(a)
             ))]
 
         case "hover":
@@ -131,7 +132,34 @@ final class Tools {
 
         case "screenshot":
             return try await engine.screenshot(app: string(a, "app"), display: int(a, "display") ?? 0,
-                                               window: string(a, "window") ?? int(a, "window").map(String.init))
+                                               window: string(a, "window") ?? int(a, "window").map(String.init),
+                                               index: int(a, "element_index"),
+                                               region: (a["region"] as? [Any])?.compactMap { ($0 as? NSNumber)?.doubleValue })
+
+        case "read_screen_text":
+            return try await engine.readScreenText(app: try required(a, "app"), query: string(a, "query"),
+                                                   window: string(a, "window") ?? int(a, "window").map(String.init))
+
+        case "wait_for":
+            return try await engine.waitFor(app: try required(a, "app"), query: try required(a, "query"), role: string(a, "role"),
+                                            gone: bool(a, "gone") ?? false, timeout: max(0.5, min(double(a, "timeout") ?? 10, 60)))
+
+        case "read_text":
+            return try await engine.readText(app: try required(a, "app"), index: int(a, "element_index"),
+                                             maxChars: max(500, min(int(a, "max_chars") ?? 20_000, 100_000)))
+
+        case "select_menu":
+            return [.text(try await engine.selectMenu(app: try required(a, "app"), path: try required(a, "path")))]
+
+        case "window":
+            return [.text(try await engine.manageWindow(
+                app: try required(a, "app"), action: try required(a, "action"),
+                window: string(a, "window") ?? int(a, "window").map(String.init),
+                x: double(a, "x"), y: double(a, "y"), width: double(a, "width"), height: double(a, "height")
+            ))]
+
+        case "open":
+            return [.text(try await engine.open(target: try required(a, "target"), app: string(a, "app")))]
 
         case "wait":
             let seconds = max(0, min(double(a, "seconds") ?? 1, 30))
@@ -222,7 +250,8 @@ final class Tools {
                 """, [
                     "app": app,
                     "disable_diff": prop("boolean", "Return the full tree instead of a diff."),
-                    "screenshot": prop("boolean", "Include a screenshot (default true). Set false to save tokens when the tree is enough."),
+                    "screenshot": prop("boolean", "Default: automatic (sent unless nothing changed since the last one). true forces it, false skips it."),
+                    "include_offscreen": prop("boolean", "Also list content scrolled out of view (skipped by default to save time and tokens)."),
                     "window": prop("string", "Which window to capture/expand: element index of a window, position in the window list, or part of its title. Default: focused window."),
                 ], ["app"]),
 
@@ -242,6 +271,7 @@ final class Tools {
                 mouse click is sent at the element's center. x/y are pixels in the latest screenshot of this app.
                 """, [
                     "app": app, "element_index": elementIndex,
+                    "text": prop("string", "Click the control showing this text: accessibility match first, OCR fallback. Saves a lookup round trip."),
                     "x": prop("number", "X in screenshot pixels (use when there is no suitable element)."),
                     "y": prop("number", "Y in screenshot pixels."),
                     "mouse_button": prop("string", "left (default), right or middle.", ["enum": ["left", "right", "middle", "l", "r", "m"]]),
@@ -323,8 +353,58 @@ final class Tools {
                 """, [
                     "app": prop("string", "App whose window to capture. Omit to capture a display."),
                     "window": prop("string", "Window selector, as in get_app_state."),
+                    "element_index": prop("integer", "Zoom into this element (full-resolution crop, good for small text)."),
+                    "region": prop("array", "Zoom into [x, y, width, height] in screenshot pixels.", ["items": ["type": "number"]]),
                     "display": prop("integer", "Display index when no app is given (0 = main)."),
                 ], []),
+
+            tool("read_screen_text", """
+                OCR the app's window on-device (Vision framework, pt-BR + en). Returns text lines in reading order with \
+                @(x,y,w,h) in the same pixels as get_app_state, so their centers are clickable. For canvases, games, \
+                remote desktops, images and any UI with poor accessibility.
+                """, [
+                    "app": app, "query": prop("string", "Only return lines containing this text."),
+                    "window": prop("string", "Window selector, as in get_app_state."),
+                ], ["app"]),
+
+            tool("wait_for", """
+                Wait until an element whose text/role matches appears (or disappears with gone=true), reacting to the \
+                app's change notifications. Use for loads, dialogs, buttons becoming available.
+                """, [
+                    "app": app, "query": prop("string", "Text to match (like find_elements)."),
+                    "role": prop("string", "Optional role filter."),
+                    "gone": prop("boolean", "Wait for it to disappear instead."),
+                    "timeout": prop("number", "Seconds (default 10, max 60)."),
+                ], ["app", "query"]),
+
+            tool("read_text", """
+                Full text of an element or the whole window — documents, emails, web pages, text areas — without the \
+                tree's truncation. Lines follow the on-screen layout.
+                """, [
+                    "app": app, "element_index": prop("integer", "Element to read (default: the current window)."),
+                    "max_chars": prop("integer", "Limit (default 20000)."),
+                ], ["app"]),
+
+            tool("select_menu", """
+                Choose a menu-bar command by path, e.g. "File > Export As…" or "View > Zoom In". Works in the background \
+                when the item is available; window-specific commands borrow focus for a moment.
+                """, [
+                    "app": app, "path": prop("string", "Menu path separated by >."),
+                ], ["app", "path"]),
+
+            tool("window", "Move, resize, minimize, restore, fullscreen, raise (without activating) or close an app window. Coordinates are screen points.", [
+                "app": app,
+                "action": prop("string", "move, resize, frame, minimize, restore, fullscreen, exit_fullscreen, raise or close.",
+                               ["enum": ["move", "resize", "frame", "minimize", "restore", "fullscreen", "exit_fullscreen", "raise", "close"]]),
+                "window": prop("string", "Window selector, as in get_app_state."),
+                "x": prop("number", "Left, screen points."), "y": prop("number", "Top, screen points."),
+                "width": prop("number", "Width, points."), "height": prop("number", "Height, points."),
+            ], ["app", "action"]),
+
+            tool("open", "Open a file, folder or URL — optionally with a specific app — without bringing it forward.", [
+                "target": prop("string", "Path (~ allowed) or URL."),
+                "app": prop("string", "App to open it with (default: the system default)."),
+            ], ["target"]),
 
             tool("wait", "Pause for a number of seconds (max 30), e.g. while something loads.", [
                 "seconds": prop("number", "Seconds to wait."),
