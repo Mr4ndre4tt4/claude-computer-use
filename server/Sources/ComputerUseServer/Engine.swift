@@ -416,6 +416,31 @@ final class Engine {
         return nil
     }
 
+    func hover(app: String, index: Int?, x: Double?, y: Double?, foreground: Bool) async throws -> String {
+        let session = try await self.session(app, launch: false)
+        defer { markAction() }
+        var point: CGPoint
+        var rect: CGRect?
+        if let index {
+            let el = try element(session, index)
+            guard let center = await center(session, index, el) else { throw ToolError("Element [\(index)] has no on-screen frame.") }
+            point = center
+            rect = el.frame
+        } else if let x, let y {
+            point = session.toScreen(x: x, y: y)
+        } else {
+            throw ToolError("Provide element_index, or both x and y.")
+        }
+        Overlay.shared.report(session, "Hovering", at: point, rect: rect)
+        if foreground {
+            await activate(session)
+            Input.move(to: point)
+        } else {
+            Input.backgroundHover(pid: session.pid, at: point)
+        }
+        return "Hovered at screen point (\(Int(point.x)), \(Int(point.y)))\(modeNote(foreground))."
+    }
+
     func drag(app: String, from: (Double, Double), to: (Double, Double), foreground: Bool) async throws -> String {
         let session = try await self.session(app, launch: false)
         defer { markAction() }

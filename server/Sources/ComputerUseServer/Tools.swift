@@ -85,6 +85,11 @@ final class Tools {
                 button: try MouseButtonKind.parse(string(a, "mouse_button")), count: count, foreground: fg(a)
             ))]
 
+        case "hover":
+            return [.text(try await engine.hover(
+                app: try required(a, "app"), index: int(a, "element_index"), x: double(a, "x"), y: double(a, "y"), foreground: fg(a)
+            ))]
+
         case "drag":
             return [.text(try await engine.drag(
                 app: try required(a, "app"),
@@ -185,7 +190,7 @@ final class Tools {
         return p
     }
 
-    private static let inputTools: Set<String> = ["click", "drag", "type_text", "press_key", "paste", "scroll"]
+    private static let inputTools: Set<String> = ["click", "hover", "drag", "type_text", "press_key", "paste", "scroll"]
 
     private func tool(_ name: String, _ description: String, _ properties: JSON, _ required: [String], action: Bool = false) -> JSON {
         var props = properties
@@ -242,6 +247,11 @@ final class Tools {
                     "mouse_button": prop("string", "left (default), right or middle.", ["enum": ["left", "right", "middle", "l", "r", "m"]]),
                     "click_count": prop("integer", "1 (default), 2 for double click, 3 for triple click."),
                 ], ["app"], action: true),
+
+            tool("hover", "Move the pointer over an element or point without clicking — opens hover submenus, tooltips and hover-only controls. Background by default (the user's real cursor stays put).", [
+                "app": app, "element_index": elementIndex,
+                "x": prop("number", "X in screenshot pixels."), "y": prop("number", "Y in screenshot pixels."),
+            ], ["app"], action: true),
 
             tool("drag", "Drag with the left mouse button between two points given in screenshot pixels.", [
                 "app": app,

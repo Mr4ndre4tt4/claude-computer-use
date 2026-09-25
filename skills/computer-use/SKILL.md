@@ -81,6 +81,8 @@ sensitive sessions.
   For multi-line text use `paste` (`format: "text" | "md" | "html"`; md/html paste rich text).
 - Text fields: `set_value` is fastest and works in the background. `select_text` places the caret
   or selects words without the mouse.
+- Hover-only UI (submenus that open on mouse-over, tooltips): `hover` the item. Chromium/Electron
+  apps may need `hover` with `foreground: true`.
 - Menus: `click` a `menuBarItem`, or `find_elements(query: "Save", role: "menuItem")` and click
   the result directly.
 - Canvas-heavy apps (Figma canvas, games, maps) expose little accessibility. Rely on the

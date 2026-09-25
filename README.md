@@ -13,7 +13,7 @@ Plugin de [Claude Code](https://claude.com/claude-code) que permite ao Claude op
 | `click` | Por elemento ou coordenada. Usa acessibilidade (Press/foco/seleção), sem mover o mouse. |
 | `type_text` / `press_key` / `paste` | Digita qualquer Unicode, aceita atalhos no estilo xdotool (`super+c`) e cola texto, Markdown ou HTML como texto formatado. Seu clipboard é restaurado depois. |
 | `set_value` / `select_text` | Preenche campos, sliders etc. Seleciona texto ou posiciona o cursor sem usar o mouse. |
-| `scroll` / `drag` | Rolagem por páginas e arrasto. |
+| `scroll` / `drag` / `hover` | Rolagem por páginas, arrasto e passar o mouse (abre submenus e tooltips) sem mover o seu cursor. |
 | `perform_secondary_action` | Ações de acessibilidade como ShowMenu, Increment, Confirm ou ações customizadas do app. |
 | `screenshot` | Captura uma janela, mesmo que esteja coberta por outras, ou uma tela inteira. |
 | `batch` | Várias ações numa única chamada. |

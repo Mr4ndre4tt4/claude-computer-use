@@ -3,7 +3,7 @@ import Foundation
 typealias JSON = [String: Any]
 
 let serverName = "computer-use"
-let serverVersion = "0.1.0"
+let serverVersion = "0.2.0"
 
 func log(_ message: String) {
     FileHandle.standardError.write(Data("[computer-use] \(message)\n".utf8))

@@ -144,6 +144,18 @@ enum Input {
         }
     }
 
+    /// Mouse-over without moving the real cursor (opens submenus, tooltips, hover states).
+    static func backgroundHover(pid: pid_t, at point: CGPoint) {
+        let window = windowNumber(pid: pid, at: point)
+        for offset in [CGPoint(x: -3, y: -2), .zero] {
+            let p = CGPoint(x: point.x + offset.x, y: point.y + offset.y)
+            if let event = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left) {
+                routed(event, window: window).postToPid(pid)
+            }
+            pause(0.03)
+        }
+    }
+
     static func backgroundDrag(pid: pid_t, from start: CGPoint, to end: CGPoint) {
         let window = windowNumber(pid: pid, at: start)
         if let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: start, mouseButton: .left) {
