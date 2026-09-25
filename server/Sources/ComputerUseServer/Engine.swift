@@ -525,6 +525,12 @@ final class Engine {
             let el = try element(session, index)
             let actions = el.actionNames
             let name = session.info[index]?.label.map { Session.quote($0, max: 40) } ?? "[\(index)]"
+            // Electron menu bars accept AXPress while inactive and do nothing: say so instead of "Pressed".
+            if !foreground, count == 1, button == .left, session.needsFocusForKeys,
+               (session.info[index]?.role ?? "").hasPrefix("AXMenu"), actions.contains("AXPress") {
+                if await pressMenuItem(el, in: session) { return "Pressed [\(index)]." }
+                throw ToolError("\(session.name) ignored the menu item [\(index)] while in the background (Electron menus only work in the active app). Use an in-window button or context menu instead, or retry with foreground: true.")
+            }
             if !foreground, count == 1, button == .left, actions.contains("AXPress"), el.perform("AXPress") == .success {
                 Overlay.shared.report(session, "Pressed \(name)", at: el.frame.map { CGPoint(x: $0.midX, y: $0.midY) }, rect: el.frame)
                 return "Pressed [\(index)]."
