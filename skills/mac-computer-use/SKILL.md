@@ -92,6 +92,12 @@ forward**:
   of a shortcut, `set_value` instead of select-all + typing.
 - Chromium/Electron/Firefox take keys in the background as well. The plugin checks that the
   focused field changed and borrows focus (and resends) only when it did not.
+- Electron apps (Postman, VS Code, Slack…): their menu bar ignores accessibility presses while
+  the app is in the background, so menu commands only count when the app visibly reacts. Prefer
+  in-window controls: buttons (`element_index` or coordinate clicks resolve to accessibility
+  presses) and context menus (`click` with `mouse_button: "right"` on an element opens its menu
+  through accessibility; then `perform_secondary_action` with `Pick` on the item, in the same
+  turn, because the menu closes on its own). Example: close a tab through its context menu.
 - **Anything that takes focus or the real pointer waits for a pause in the user's own input**
   (≥ 1.2 s without keyboard or mouse). If the user keeps working for 10 s, the action fails with
   a "postponed" error instead of interrupting them: retry later or use a background route.

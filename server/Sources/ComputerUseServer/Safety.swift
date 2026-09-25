@@ -54,4 +54,19 @@ enum Safety {
         }
         return nil
     }
+
+    /// Another app's floating window (screenshot toolbar, PiP, panels: layer > 0) over a point.
+    /// Activating the target cannot lift it above those, so check before taking focus.
+    static func floatingCover(at point: CGPoint, excluding pid: pid_t) -> String? {
+        for w in windows() where isForeign(w) && (w[kCGWindowLayer as String] as? Int ?? 0) > 0 {
+            guard let owner = w[kCGWindowOwnerPID as String] as? pid_t, owner != pid,
+                  let dict = w[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: dict), bounds.contains(point) else { continue }
+            let name = w[kCGWindowOwnerName as String] as? String ?? "?"
+            if name == "Dock", let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? NSScreen.main,
+               bounds.width * bounds.height > screen.frame.width * screen.frame.height * 0.5 { continue }
+            return name
+        }
+        return nil
+    }
 }

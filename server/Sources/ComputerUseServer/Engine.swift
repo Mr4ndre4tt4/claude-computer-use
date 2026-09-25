@@ -350,7 +350,13 @@ final class Engine {
 
     private func pointer(_ session: Session, foreground: Bool, restoreCursor: Bool = true, at point: CGPoint?,
                          background: (pid_t) -> Void, real: () -> Void) async throws -> String {
+        func refuseIfCovered() throws {
+            if let point, let cover = Safety.floatingCover(at: point, excluding: session.pid) {
+                throw ToolError("\(cover) has a floating window over that point, so the real pointer was not used and \(session.name) was not brought forward. Try an element_index action, or ask the user to move that window.")
+            }
+        }
         if foreground {
+            try refuseIfCovered()
             try await activate(session)
             try checkPointerTarget(session, point)
             real()
@@ -365,6 +371,7 @@ final class Engine {
             return " (background; no UI change was detected. If the click should have done something, retry with foreground: true, which briefly takes the pointer and focus)"
         }
         // Chromium/Electron/Firefox: the background attempt showed no effect; borrow the pointer.
+        try refuseIfCovered()
         let previous = userFrontmost(excluding: session)
         let cursor = CGEvent(source: nil)?.location
         try await activate(session)
@@ -762,7 +769,7 @@ final class Engine {
         // Most shortcuts are a menu item's key equivalent: pressing the item through accessibility
         // runs the same command with no focus switch at all.
         if isShortcut, !foreground, !session.shortcutsWorkInBackground, !session.isFrontmost,
-           let item = menuItem(matching: stroke, in: session), item.perform("AXPress") == .success {
+           let item = menuItem(matching: stroke, in: session), await pressMenuItem(item, in: session) {
             return "Pressed \(key) through its menu item \(Session.quote(item.str("AXTitle") ?? "?")) (background, no focus change)."
         }
         let how = try await withKeyboard(session, foreground: foreground, needsKeyWindow: isShortcut) { Input.press(stroke, to: $0) }
@@ -1249,7 +1256,7 @@ final class Engine {
             current = next
         }
         Overlay.shared.report(session, "Menu " + trail.joined(separator: " › "), at: nil)
-        if current.bool("AXEnabled") != false, current.perform("AXPress") == .success {
+        if current.bool("AXEnabled") != false, await pressMenuItem(current, in: session) {
             return "Chose \(trail.joined(separator: " > ")) (background)."
         }
         // Window commands are disabled while the app is inactive, and menus only re-validate when
@@ -1268,6 +1275,16 @@ final class Engine {
         await giveFocusBack(to: previous, from: session)
         guard status == .success else { throw ToolError("\(trail.joined(separator: " > ")) is unavailable right now (AXError \(status.rawValue)).") }
         return "Chose \(trail.joined(separator: " > ")) (\(how))."
+    }
+
+    /// Presses a menu item through accessibility. Chromium/Electron menu bars report success for
+    /// presses that do nothing while the app is inactive, so there it only counts when the app
+    /// visibly reacted.
+    private func pressMenuItem(_ item: AXUIElement, in session: Session) async -> Bool {
+        let start = Date()
+        guard item.perform("AXPress") == .success else { return false }
+        guard session.needsFocusForKeys else { return true }
+        return await changed(session, since: start, within: 0.8) == true
     }
 
     /// The enabled menu item whose key equivalent is `stroke` (Apple menu excluded: its shortcuts
