@@ -76,8 +76,22 @@ final class Engine {
         }
     }
 
+    /// Anything that takes focus or the pointer first waits for a pause in the user's own input,
+    /// so it never lands in the middle of their typing, a click or a drag. If they keep going,
+    /// the action is postponed (error) rather than interrupting them.
+    private func waitForUserPause(_ what: String) async throws {
+        let deadline = Date().addingTimeInterval(10)
+        while Safety.userIdleSeconds() < 1.2 {
+            guard Date() < deadline else {
+                throw ToolError("The user has been typing or using the mouse continuously, so \(what) was postponed to avoid interrupting them. Retry in a moment, or use a background route (element_index actions, select_menu, set_value, paste).")
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+    }
+
     /// Brings the app (and the window we last looked at) to the front before synthetic input.
-    private func activate(_ session: Session) async {
+    private func activate(_ session: Session) async throws {
+        if !session.isFrontmost { try await waitForUserPause("bringing \(session.name) forward") }
         let wasFrontmost = session.isFrontmost
         if !wasFrontmost {
             session.appElement.set("AXFrontmost", kCFBooleanTrue)
@@ -337,7 +351,7 @@ final class Engine {
     private func pointer(_ session: Session, foreground: Bool, restoreCursor: Bool = true, at point: CGPoint?,
                          background: (pid_t) -> Void, real: () -> Void) async throws -> String {
         if foreground {
-            await activate(session)
+            try await activate(session)
             try checkPointerTarget(session, point)
             real()
             return " (foreground)"
@@ -352,7 +366,7 @@ final class Engine {
         }
         let previous = userFrontmost(excluding: session)
         let cursor = CGEvent(source: nil)?.location
-        await activate(session)
+        try await activate(session)
         do { try checkPointerTarget(session, point) } catch {
             await giveFocusBack(to: previous, from: session)
             throw error
@@ -394,17 +408,17 @@ final class Engine {
         }
     }
 
-    /// Runs keyboard input. Background by default; apps that ignore background keys get a brief
-    /// focus borrow (~0.2 s) and the user's app is re-activated right after.
-    /// Runs keyboard input on the plugin's virtual keyboard: keys are posted to the target process
-    /// only, never into the shared HID stream, so they cannot reach another app or mix with the
-    /// user's typing. Apps that only accept keys while active get a brief focus borrow (~0.2 s).
     /// Keys go to the app's key window, which is not always the window the agent is working in
     /// (activating Excel makes the workbook key even while the VBA editor is open, so text meant
     /// for the editor lands in cells). Move focus to the working window, or refuse.
-    private func ensureKeyWindow(_ session: Session) throws {
+    private func ensureKeyWindow(_ session: Session, weActivated: Bool = false) throws {
         guard let target = session.window, session.windows.count > 1,
               let key = session.keyWindow, !CFEqual(key, target) else { return }
+        // The user is working in this app: moving its focused window would pull it out from under them.
+        if !weActivated, session.isFrontmost, session.modalAlert == nil {
+            let keyTitle = Walker.nonEmptyTitle(key.str("AXTitle")) ?? "another window"
+            throw ToolError("The user is working in \"\(keyTitle)\" of \(session.name) right now, and keys only reach its focused window. Nothing was sent, to avoid switching windows under them. Wait until they switch to another app, use background routes (set_value, element_index clicks, paste), or ask the user.")
+        }
         target.set("AXMain", kCFBooleanTrue)
         target.set("AXFocused", kCFBooleanTrue)
         if let now = session.keyWindow, !CFEqual(now, target) {
@@ -415,17 +429,24 @@ final class Engine {
         }
     }
 
+    /// Runs keyboard input on the plugin's virtual keyboard: keys are posted to the target process
+    /// only, never into the shared HID stream, so they cannot reach another app or mix with the
+    /// user's typing. Apps that only accept keys while active get a brief focus borrow (~0.2 s),
+    /// taken only during a pause in the user's own input.
     private func withKeyboard(_ session: Session, foreground: Bool, needsKeyWindow: Bool = false, _ body: (pid_t) -> Void) async throws -> String {
         let needsKeyWindow = needsKeyWindow && !session.shortcutsWorkInBackground
         let previous = userFrontmost(excluding: session)
         try ensureKeyWindow(session)
+        // The user is in this very window: our keys would interleave with theirs, so wait for a pause.
+        if session.isFrontmost && !foreground { try await waitForUserPause("typing into \(session.name), which the user is using") }
         if foreground {
-            await activate(session)
-            try ensureKeyWindow(session)
+            try await activate(session)
+            try ensureKeyWindow(session, weActivated: true)
             body(session.pid)
             return session.isFrontmost ? " (foreground)" : " (could not bring the app forward; sent in background)"
         }
         if (session.needsFocusForKeys || needsKeyWindow) && !session.isFrontmost {
+            try await waitForUserPause("the brief focus switch needed to type into \(session.name)")
             session.appElement.set("AXFrontmost", kCFBooleanTrue)
             if let window = session.window {
                 window.perform("AXRaise")
@@ -437,7 +458,7 @@ final class Engine {
             // Frontmost is reported before the key window accepts input; keys sent right away get lost.
             try? await Task.sleep(nanoseconds: 150_000_000)
             let front = session.isFrontmost
-            do { try ensureKeyWindow(session) } catch {
+            do { try ensureKeyWindow(session, weActivated: true) } catch {
                 await giveFocusBack(to: previous, from: session)
                 throw error
             }
@@ -712,6 +733,12 @@ final class Engine {
         Overlay.shared.report(session, "Pressed \(key)", at: nil)
         // Menu shortcuts (Cmd/Ctrl+…) act on the key window, which only an active app has.
         let isShortcut = stroke.modifiers.contains { $0.flag == .maskCommand || $0.flag == .maskControl }
+        // Most shortcuts are a menu item's key equivalent: pressing the item through accessibility
+        // runs the same command with no focus switch at all.
+        if isShortcut, !foreground, !session.shortcutsWorkInBackground, !session.isFrontmost,
+           let item = menuItem(matching: stroke, in: session), item.perform("AXPress") == .success {
+            return "Pressed \(key) through its menu item \(Session.quote(item.str("AXTitle") ?? "?")) (background, no focus change)."
+        }
         let how = try await withKeyboard(session, foreground: foreground, needsKeyWindow: isShortcut) { Input.press(stroke, to: $0) }
         return "Pressed \(key)\(how)."
     }
@@ -1202,7 +1229,7 @@ final class Engine {
         // Window commands are disabled while the app is inactive, and menus only re-validate when
         // opened. Borrow focus, press anyway, and fall back to the item's own keyboard shortcut.
         let previous = userFrontmost(excluding: session)
-        await activate(session)
+        try await activate(session)
         try? await Task.sleep(nanoseconds: 120_000_000)
         var how = "focus borrowed briefly, then returned"
         var status = current.perform("AXPress")
@@ -1215,6 +1242,36 @@ final class Engine {
         await giveFocusBack(to: previous, from: session)
         guard status == .success else { throw ToolError("\(trail.joined(separator: " > ")) is unavailable right now (AXError \(status.rawValue)).") }
         return "Chose \(trail.joined(separator: " > ")) (\(how))."
+    }
+
+    /// The enabled menu item whose key equivalent is `stroke` (Apple menu excluded: its shortcuts
+    /// are system-wide, like Force Quit).
+    private func menuItem(matching stroke: KeyStroke, in session: Session) -> AXUIElement? {
+        func signature(_ s: KeyStroke) -> String {
+            "\(s.code ?? 0):" + s.modifiers.map { String($0.flag.rawValue) }.sorted().joined(separator: ",")
+        }
+        let wanted = signature(stroke)
+        func search(_ menu: AXUIElement, _ depth: Int) -> AXUIElement? {
+            guard depth < 4 else { return nil }
+            for item in menu.elements("AXChildren") {
+                if let equivalent = shortcut(of: item), signature(equivalent) == wanted, item.bool("AXEnabled") != false {
+                    return item
+                }
+                if let submenu = item.elements("AXChildren").first(where: { $0.str("AXRole") == "AXMenu" }),
+                   let found = search(submenu, depth + 1) {
+                    return found
+                }
+            }
+            return nil
+        }
+        guard let menuBar = session.appElement.element("AXMenuBar") else { return nil }
+        for barItem in menuBar.elements("AXChildren").dropFirst() {
+            if let menu = barItem.elements("AXChildren").first(where: { $0.str("AXRole") == "AXMenu" }),
+               let found = search(menu, 0) {
+                return found
+            }
+        }
+        return nil
     }
 
     /// A menu item's key equivalent as a keystroke (AXMenuItemCmdChar + AXMenuItemCmdModifiers).

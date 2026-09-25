@@ -249,7 +249,8 @@ final class Overlay {
         }
     }
 
-    /// Bottom-right by default; another corner when that one would cover the controlled window.
+    /// Bottom-right by default; another corner when that one would cover the user's own window
+    /// (weighted most) or the controlled window.
     private func bestOrigin(for size: NSSize) -> NSPoint {
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
         let area = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -260,13 +261,17 @@ final class Overlay {
             NSPoint(x: area.maxX - size.width - inset, y: area.maxY - size.height - inset),
             NSPoint(x: area.minX + inset, y: area.maxY - size.height - inset),
         ]
-        guard targetFrame.width > 0, let primary = NSScreen.screens.first?.frame else { return candidates[0] }
-        let target = NSRect(x: targetFrame.minX, y: primary.maxY - targetFrame.maxY, width: targetFrame.width, height: targetFrame.height)
-        func overlap(_ origin: NSPoint) -> CGFloat {
-            let r = NSRect(origin: origin, size: size).intersection(target)
+        guard let primary = NSScreen.screens.first?.frame else { return candidates[0] }
+        func flipped(_ r: CGRect) -> NSRect { NSRect(x: r.minX, y: primary.maxY - r.maxY, width: r.width, height: r.height) }
+        let target = targetFrame.width > 0 ? flipped(targetFrame) : nil
+        let userWindow = Safety.frontWindowFrame().map(flipped)
+        func overlap(_ origin: NSPoint, _ other: NSRect?) -> CGFloat {
+            guard let other else { return 0 }
+            let r = NSRect(origin: origin, size: size).intersection(other)
             return r.isNull ? 0 : r.width * r.height
         }
-        return candidates.min { overlap($0) < overlap($1) - 1 } ?? candidates[0]
+        func cost(_ origin: NSPoint) -> CGFloat { overlap(origin, userWindow) * 3 + overlap(origin, target) }
+        return candidates.min { cost($0) < cost($1) - 1 } ?? candidates[0]
     }
 
     // MARK: Show / hide

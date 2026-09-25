@@ -82,11 +82,19 @@ forward**:
   clipboard. Plain keys (Return, Tab, arrows, letters) are posted to the app's process.
 - `paste` presses a window's own **Paste** toolbar button when it has one (legacy editors such as
   Excel's VBA editor ignore Cmd+V while in the background), then restores the clipboard.
-- Cmd/Ctrl shortcuts briefly borrow focus (~0.2 s, then hand it back) in apps that need an
-  active key window. Microsoft Office apps take them in the background. Keys for
-  Chromium/Electron/Firefox apps borrow focus too. To avoid even that flicker, prefer the
-  accessibility route when there is one: `window(action: "close")` instead of `super+w`,
-  `select_menu` instead of a shortcut, `set_value` instead of select-all + typing.
+- Cmd/Ctrl shortcuts are first resolved to the menu item that owns that key equivalent and
+  pressed through accessibility, with no focus change. Microsoft Office apps also take them
+  directly in the background. Only when neither works does the plugin briefly borrow focus
+  (~0.2 s, then hand it back). Keys for Chromium/Electron/Firefox apps borrow focus too. To avoid
+  even that, prefer the accessibility route when there is one: `window(action: "close")` instead
+  of `super+w`, `select_menu` instead of a shortcut, `set_value` instead of select-all + typing.
+- **Anything that takes focus or the real pointer waits for a pause in the user's own input**
+  (≥ 1.2 s without keyboard or mouse). If the user keeps working for 10 s, the action fails with
+  a "postponed" error instead of interrupting them: retry later or use a background route.
+- **Never pull a window out from under the user.** If the target app is the one the user is
+  working in and its focused window is not your working window, keyboard input is refused
+  rather than switching windows. If the user is in your working window itself, keys wait for a
+  pause in their typing.
 - If an app steals focus by itself, focus is handed back.
 - If an app stops responding, tools keep probing for a few seconds (longer right after an
   action) before failing with a clear message. Wait and retry, and never force-quit the user's

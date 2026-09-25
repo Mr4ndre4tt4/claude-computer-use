@@ -37,4 +37,21 @@ enum Safety {
         }
         return nil
     }
+
+    /// Seconds since the user's last real keyboard or mouse input. The plugin's own keys are
+    /// posted to processes, not the HID stream, so they don't count.
+    static func userIdleSeconds() -> Double {
+        let types: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+                                    .leftMouseDragged, .mouseMoved, .scrollWheel]
+        return types.map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }.min() ?? .infinity
+    }
+
+    /// Frame (top-left origin) of the frontmost normal window: the one the user is working in.
+    static func frontWindowFrame() -> CGRect? {
+        for w in windows() where isForeign(w) && (w[kCGWindowLayer as String] as? Int) == 0 {
+            guard let dict = w[kCGWindowBounds as String] as? NSDictionary else { return nil }
+            return CGRect(dictionaryRepresentation: dict)
+        }
+        return nil
+    }
 }

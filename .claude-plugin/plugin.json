@@ -1,6 +1,6 @@
 {
   "name": "computer-use",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Controla apps nativos do macOS em segundo plano: árvore de acessibilidade com índices estáveis e diffs, screenshots por janela, cliques/teclado sem mexer no seu mouse, painel de visão ao vivo e compartilhamento de janela.",
   "author": { "name": "Enzo Andreatta", "email": "zoh.andreatta@gmail.com" },
   "homepage": "https://github.com/Mr4ndre4tt4/claude-computer-use",
