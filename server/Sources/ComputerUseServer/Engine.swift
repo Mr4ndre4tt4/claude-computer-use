@@ -356,14 +356,15 @@ final class Engine {
             real()
             return " (foreground)"
         }
+        let start = Date()
+        background(session.pid)
+        if await changed(session, since: start) != false { return " (background)" }
         if !session.needsFocusForKeys {
-            let start = Date()
-            background(session.pid)
-            if await changed(session, since: start) != false { return " (background)" }
             // Don't escalate on our own: a real click activates the app and moves the user's
             // pointer. Often nothing changed simply because the target is inert (a label).
             return " (background; no UI change was detected. If the click should have done something, retry with foreground: true, which briefly takes the pointer and focus)"
         }
+        // Chromium/Electron/Firefox: the background attempt showed no effect; borrow the pointer.
         let previous = userFrontmost(excluding: session)
         let cursor = CGEvent(source: nil)?.location
         try await activate(session)
@@ -445,7 +446,7 @@ final class Engine {
             body(session.pid)
             return session.isFrontmost ? " (foreground)" : " (could not bring the app forward; sent in background)"
         }
-        if (session.needsFocusForKeys || needsKeyWindow) && !session.isFrontmost {
+        func borrow() async throws -> String {
             try await waitForUserPause("the brief focus switch needed to type into \(session.name)")
             session.appElement.set("AXFrontmost", kCFBooleanTrue)
             if let window = session.window {
@@ -466,6 +467,21 @@ final class Engine {
             try? await Task.sleep(nanoseconds: 100_000_000)
             await giveFocusBack(to: previous, from: session)
             return front ? " (focus borrowed ~0.2s, then returned)" : " (could not take focus; sent in background)"
+        }
+        if needsKeyWindow && !session.isFrontmost { return try await borrow() }
+        if session.needsFocusForKeys && !session.isFrontmost {
+            // Current Chromium/Electron builds take pid-posted keys in the background. Verify on the
+            // focused text field and only borrow focus (and resend) when nothing arrived.
+            let field = session.appElement.element("AXFocusedUIElement")
+            let before = field?.str("AXValue")
+            let start = Date()
+            body(session.pid)
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            let noticed = await changed(session, since: start)
+            if let before, field?.str("AXValue") == before, noticed != true {
+                return try await borrow() + " — background keys had no effect"
+            }
+            return " (background)"
         }
         body(session.pid)
         await giveFocusBack(to: previous, from: session)
@@ -733,6 +749,16 @@ final class Engine {
         Overlay.shared.report(session, "Pressed \(key)", at: nil)
         // Menu shortcuts (Cmd/Ctrl+…) act on the key window, which only an active app has.
         let isShortcut = stroke.modifiers.contains { $0.flag == .maskCommand || $0.flag == .maskControl }
+        // Select All in a text field: set the selection through accessibility (works in the
+        // background everywhere, including Chromium where posted Cmd+A is ignored).
+        if !foreground, stroke.code == 0, stroke.modifiers.map(\.flag) == [.maskCommand],
+           let field = session.appElement.element("AXFocusedUIElement"), field.isSettable("AXSelectedTextRange"),
+           let text = field.str("AXValue") {
+            var range = CFRange(location: 0, length: text.utf16.count)
+            if let value = AXValueCreate(.cfRange, &range), field.set("AXSelectedTextRange", value) == .success {
+                return "Pressed \(key): selected all text of the focused field through accessibility (background, no focus change)."
+            }
+        }
         // Most shortcuts are a menu item's key equivalent: pressing the item through accessibility
         // runs the same command with no focus switch at all.
         if isShortcut, !foreground, !session.shortcutsWorkInBackground, !session.isFrontmost,

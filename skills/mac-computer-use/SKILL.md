@@ -73,9 +73,10 @@ forward**:
 - Clicks use accessibility (Press / focus / select). Coordinate clicks hit-test the element under
   the point first. Only if nothing pressable is there are mouse events posted to the app's process.
   If that has no visible effect, the tool says so and does **not** escalate on its own: retry with
-  `foreground: true` only when the click really should have done something. Chromium, Electron
-  and Firefox ignore background pointer events, so for them clicks briefly borrow the pointer and
-  focus. A real pointer event is refused if another app's window covers the point.
+  `foreground: true` only when the click really should have done something. For Chromium,
+  Electron and Firefox the background attempt comes first too; only when it shows no effect do
+  they briefly borrow the pointer and focus. A real pointer event is refused if another app's
+  window covers the point.
 - Scrolling sets the scroll bar through accessibility (exact, fully in the background). It only
   falls back to wheel events where there is no accessible scroll bar.
 - Typing (and plain-text `paste`) into native fields inserts text directly, without touching the
@@ -85,9 +86,12 @@ forward**:
 - Cmd/Ctrl shortcuts are first resolved to the menu item that owns that key equivalent and
   pressed through accessibility, with no focus change. Microsoft Office apps also take them
   directly in the background. Only when neither works does the plugin briefly borrow focus
-  (~0.2 s, then hand it back). Keys for Chromium/Electron/Firefox apps borrow focus too. To avoid
-  even that, prefer the accessibility route when there is one: `window(action: "close")` instead
-  of `super+w`, `select_menu` instead of a shortcut, `set_value` instead of select-all + typing.
+  (~0.2 s, then hand it back). `super+a` in a text field sets the selection through
+  accessibility instead (background in every app). To avoid any borrow, prefer the accessibility
+  route when there is one: `window(action: "close")` instead of `super+w`, `select_menu` instead
+  of a shortcut, `set_value` instead of select-all + typing.
+- Chromium/Electron/Firefox take keys in the background as well. The plugin checks that the
+  focused field changed and borrows focus (and resends) only when it did not.
 - **Anything that takes focus or the real pointer waits for a pause in the user's own input**
   (≥ 1.2 s without keyboard or mouse). If the user keeps working for 10 s, the action fails with
   a "postponed" error instead of interrupting them: retry later or use a background route.

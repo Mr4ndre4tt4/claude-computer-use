@@ -34,7 +34,8 @@ Plugin de [Claude Code](https://claude.com/claude-code) que permite ao Claude op
   - Os cliques usam a acessibilidade do app, e cliques por coordenada identificam o elemento naquele ponto e o acionam da mesma forma.
   - A digitação e a colagem de texto simples em campos nativos são inseridas direto, sem usar o clipboard.
   - **Atalhos sem trocar de foco.** Um atalho Cmd/Ctrl é resolvido pelo item de menu que tem aquele atalho e acionado pela acessibilidade. O Office também aceita atalhos direto em segundo plano.
-  - Só quando não há outro caminho o plugin pega o foco por cerca de 0,2 s e devolve na hora (teclado em Chrome, Electron e Firefox, ou atalho sem item de menu). **Isso só acontece numa pausa sua** (≥ 1,2 s sem teclado ou mouse). Se você continuar trabalhando, a ação é adiada em vez de te interromper.
+  - **Chrome, Electron e Firefox também em segundo plano.** Teclas e cliques vão primeiro em segundo plano, e o plugin confere se o campo mudou. `Cmd+A` num campo vira uma seleção feita pela acessibilidade.
+  - Só quando não há outro caminho o plugin pega o foco por cerca de 0,2 s e devolve na hora (atalho sem item de menu, ou quando a tentativa em segundo plano não teve efeito). **Isso só acontece numa pausa sua** (≥ 1,2 s sem teclado ou mouse). Se você continuar trabalhando, a ação é adiada em vez de te interromper.
   - **Não mexe nas suas janelas.** Se você está usando o próprio app alvo, o plugin não troca a janela ativa dele debaixo de você. Se você está na mesma janela, as teclas esperam uma pausa na sua digitação.
   - O card flutuante evita ficar por cima da janela em que você está trabalhando (e da janela controlada). Para desligá-lo, use `COMPUTER_USE_HUD=0`.
   - Se um app roubar o foco sozinho, o plugin devolve o foco para você.
