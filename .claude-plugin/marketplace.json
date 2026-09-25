@@ -1,0 +1,11 @@
+{
+  "name": "claude-computer-use",
+  "owner": { "name": "Enzo Andreatta", "email": "zoh.andreatta@gmail.com" },
+  "plugins": [
+    {
+      "name": "computer-use",
+      "source": "./",
+      "description": "Computer use para macOS: controla apps nativos em segundo plano, com visão ao vivo e share window."
+    }
+  ]
+}

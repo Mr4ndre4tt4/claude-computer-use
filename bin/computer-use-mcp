@@ -1,0 +1,9 @@
+#!/bin/sh
+# Launcher for the computer-use MCP server. Uses the bundled binary, or builds it on first run.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$DIR/computer-use-server"
+if [ ! -x "$BIN" ]; then
+  echo "[computer-use] building server (first run)..." >&2
+  "$DIR/../scripts/build.sh" >&2 || exit 1
+fi
+exec "$BIN" "$@"
